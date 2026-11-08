@@ -1,4 +1,5 @@
 """Builds dist/Archipelago.luma and dist/smg.apworld. Run mod/build.cmd first."""
+import json
 import os
 import zipfile
 
@@ -18,15 +19,28 @@ def pack_luma() -> str:
     return out
 
 
+# What Archipelago's own apworld packager adds to a packaged world's manifest (worlds/Files.py, APWorldContainer):
+# the container format it was written in and the oldest one that can read it.
+APWORLD_CONTAINER_VERSION = 7
+
+
 def pack_apworld() -> str:
     world = os.path.join(ROOT, "apworld", "smg")
     out = os.path.join(DIST, "smg.apworld")
+    with open(os.path.join(world, "archipelago.json"), encoding="utf-8") as f:
+        manifest = json.load(f)
+    manifest["version"] = APWORLD_CONTAINER_VERSION
+    manifest["compatible_version"] = APWORLD_CONTAINER_VERSION
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for folder, dirs, files in os.walk(world):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
             for name in files:
                 path = os.path.join(folder, name)
-                z.write(path, os.path.join("smg", os.path.relpath(path, world)))
+                arcname = os.path.join("smg", os.path.relpath(path, world)).replace(os.sep, "/")
+                if arcname == "smg/archipelago.json":
+                    z.writestr(arcname, json.dumps(manifest, indent=2))
+                else:
+                    z.write(path, arcname)
     return out
 
 
