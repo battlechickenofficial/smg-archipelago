@@ -1,0 +1,42 @@
+{
+  "format": 1,
+  "id": "archipelago",
+  "name": "Archipelago",
+  "version": "0.1.0",
+  "game": "RMG",
+  "authors": ["SMG Archipelago"],
+  "description": "Connects Super Mario Galaxy to an Archipelago multiworld through the Super Mario Galaxy client. Does nothing until a seed is received.",
+  "license": "GPL-3.0-only",
+  "options": [
+    {
+      "id": "archipelago",
+      "name": "Archipelago",
+      "description": "Off: the mod does nothing at all.",
+      "default": "on",
+      "choices": [
+        { "id": "on", "name": "On" },
+        { "id": "off", "name": "Off" }
+      ]
+    },
+    {
+      "id": "port",
+      "name": "Client Port",
+      "description": "The local port of the Super Mario Galaxy client (its --port).",
+      "default": "43770",
+      "choices": [
+        { "id": "43770", "name": "43770" },
+        { "id": "43771", "name": "43771" },
+        { "id": "43772", "name": "43772" },
+        { "id": "43773", "name": "43773" }
+      ]
+    }
+  ],
+  "save": { "mode": "own", "tag": "archipelago", "player_can_change": true },
+  "layers": [],
+  "plugins": [
+    {
+      "api": 1,
+      "binaries": { "windows-x64": "plugins/smg_archipelago.dll" }
+    }
+  ]
+}

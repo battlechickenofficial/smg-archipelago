@@ -1,0 +1,18 @@
+# Your own game: never committed.
+*.7z
+*.iso
+*.rvz
+*.wbfs
+
+# Build output (mod/build.cmd, mod/test/build_mock.cmd, package.py)
+mod/build/
+mod/test/build/
+mod/plugins/
+dist/
+*.obj
+*.lib
+*.exp
+*.pdb
+
+__pycache__/
+*.pyc
