@@ -312,6 +312,11 @@ class SMGWorld(World):
                              if info.code is not None},
             "enemy_groups": self._enemy_groups(),
             "power_ups": self._power_up_rules(),
+            "skip_cutscenes": {
+                "enabled": bool(self.options.skip_cutscenes),
+                "never_movies": list(data.ENDING_MOVIES),
+                "never_stages": list(data.ENDING_STAGES),
+            },
         }
 
     def _enemy_groups(self) -> Dict[str, List[int]]:

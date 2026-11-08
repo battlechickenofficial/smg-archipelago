@@ -177,9 +177,17 @@ class PersistentPowerUps(Choice):
     default = 2
 
 
-class UntimedPowerUps(DefaultOnToggle):
-    """The Fire Flower, Ice Flower and Red Star don't run out. The Rainbow Star still does."""
+class UntimedPowerUps(Toggle):
+    """The Fire Flower, Ice Flower and Red Star don't run out. The Rainbow Star still does.
+    Experimental: off by default, as the game's own timers are what its levels expect."""
     display_name = "Untimed Power-Ups"
+
+
+class SkipCutscenes(Toggle):
+    """Skip cutscenes: the movies, a galaxy's opening camera tour, Rosalina's story scenes and storybook, stars
+    returning to the Observatory, the lessons and the bosses' scenes (what Nebula's own + skip skips), as if you
+    pressed + and chose Yes. The ending after the final fight is never skipped."""
+    display_name = "Skip Cutscenes"
 
 
 class ItemMessages(DefaultOnToggle):
@@ -209,6 +217,7 @@ class SMGOptions(PerGameCommonOptions):
     power_up_item_weight: PowerUpItemWeight
     persistent_power_ups: PersistentPowerUps
     untimed_power_ups: UntimedPowerUps
+    skip_cutscenes: SkipCutscenes
     item_messages: ItemMessages
     death_link: DeathLink
 
@@ -220,5 +229,5 @@ option_groups = [
     OptionGroup("Traps", [TrapPercentage, DamageTrap, PowerUpLossTrap, StarBitDrainTrap, EnemyTraps,
                           EnemyTrapGroups]),
     OptionGroup("Power-Ups", [PowerUpItems, PowerUpItemWeight, PersistentPowerUps, UntimedPowerUps]),
-    OptionGroup("Items", [ItemMessages]),
+    OptionGroup("Other", [SkipCutscenes, ItemMessages]),
 ]

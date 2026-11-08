@@ -325,3 +325,12 @@ TIMED_POWER_UPS: Tuple[int, ...] = (2, 3, 7)
 # The player table's timers for those (a u16 of frames): raised to their most when power-ups are untimed.
 POWER_UP_TIMER_CONSTANTS: Tuple[str, ...] = ("mFireModeTime", "mIceModeTime")
 POWER_UP_TIMER_MAX = 65535
+
+
+# ---- Cutscene skip. Nebula skips what its own + skip would; these are never skipped: the movies after the final
+# fight, and anything in the stages where the ending plays.
+ENDING_MOVIES: Tuple[str, ...] = (
+    "/MovieData/EpilogueA.thp", "/MovieData/EpilogueALuigi.thp", "/MovieData/EpilogueB.thp",
+    "/MovieData/EndingA.thp", "/MovieData/EndingALuigi.thp", "/MovieData/EndingB.thp",
+)
+ENDING_STAGES: Tuple[str, ...] = ("KoopaBattleVs3Galaxy", "EpilogueDemoStage", "PeachCastleGardenGalaxy")

@@ -22,9 +22,14 @@ Beat Bowser in Bowser's Galaxy Reactor. The galaxy needs its unlock item and a n
 - One unlock item per galaxy (except Gateway and the starting galaxy).
 - Luigi, which lets you play as Luigi from the file select.
 - Filler: 1-Up Mushrooms, star bits, coins, life refills, and power-ups (Fire Flower, Ice Flower, Bee, Spring and
-  Boo Mushrooms, Red Star, Rainbow Star). Power-ups can carry over between levels and need not run out.
+  Boo Mushrooms, Red Star, Rainbow Star). Power-ups can carry over between levels.
 - Optional traps, each switched on or off: damage, power-up loss, star bit drain, and enemy traps that drop a group
   of enemies on top of you (which enemies and how many is up to you).
+
+## Can cutscenes be skipped?
+
+Yes, with Skip Cutscenes: movies, story scenes, star returns and boss scenes are skipped. The ending is never
+skipped.
 
 ## What does another world's item look like in Super Mario Galaxy?
 

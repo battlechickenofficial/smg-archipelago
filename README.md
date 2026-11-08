@@ -54,7 +54,8 @@ See [apworld/smg/docs/setup_en.md](apworld/smg/docs/setup_en.md). In short:
 | `power_up_items` | all | Power-ups that can be filler: Fire Flower, Ice Flower, Bee, Spring, Boo Mushroom, Red Star, Rainbow Star. |
 | `power_up_item_weight` | 7 | How often filler is a power-up (the other filler weighs 13 in total). |
 | `persistent_power_ups` | all | A power-up stays with you from level to level until lost. `items_only`, or `off`. Never the Rainbow Star. |
-| `untimed_power_ups` | on | Fire Flower, Ice Flower and Red Star don't run out. The Rainbow Star still does. |
+| `untimed_power_ups` | off | Experimental: Fire Flower, Ice Flower and Red Star don't run out. The Rainbow Star still does. |
+| `skip_cutscenes` | off | Skip movies, galaxy opening cameras, Rosalina's story scenes and storybook, star returns, lessons and boss scenes. Never the ending after the final fight. |
 | `item_messages` | on | In-game messages for items sent and received. |
 | `death_link` | off | Standard DeathLink. |
 
@@ -108,6 +109,9 @@ Archipelago server ⇄ Super Mario Galaxy Client (Python, CommonClient)
 - **Items.** Unlocks are tokens; filler and traps are applied once each (the plugin remembers the last item index).
 - **Enemy traps.** The client sends the game's object name and the group size; the plugin spawns them one every few
   frames on a ring above the player, against the local gravity.
+- **Cutscene skip.** Drives Nebula's own + skip: while a cutscene plays, the plugin lets Nebula's skip see + pressed
+  and answers its question Yes without showing it, so exactly what Nebula can skip is skipped, Nebula's own way. The
+  movies after the final fight, and anything in the stages where the ending plays, are never skipped.
 - **Power-ups.** A received power-up waits until a stage can take it (the game refuses one whose model the stage
   lacks). With persistence, the plugin gives the carried power-up back after each level loads, and forgets it when
   it's really lost (a hit, water, light, death, a trap). Untimed power-ups: the plugin raises the game's

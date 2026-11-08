@@ -14,6 +14,8 @@
 //   timer                      the power-up's time runs out (the game asks for none)
 //   hit                        the player is hit and loses the power-up
 //   reset                      a new stage's load resets the power-up
+//   cutscene <0|1>             a cutscene plays (one Nebula's + skip can skip)
+//   movie <path>|off           a movie starts (through MR::startMoviePlayer) or ends
 //   quit
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -22,6 +24,7 @@
 #include <nebula_mod_api.h>
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -47,6 +50,80 @@ int luigi = 0;
 bool in_stage = false;
 std::string stage;
 int power = 0;
+int cutscene = 0;
+bool movie_active = false;
+
+// ---- A few of the game's functions, hookable as Nebula hooks them: each is called through its slot, and hook() puts
+// the plugin's function in the slot and hands back what was there.
+struct Slot {
+    const char* symbol;
+    void* original;
+    void* current;
+};
+std::vector<Slot> slots;
+
+template <typename Fn>
+Fn through(const char* symbol) {
+    for (const Slot& slot : slots) {
+        if (std::strcmp(slot.symbol, symbol) == 0) return reinterpret_cast<Fn>(slot.current);
+    }
+    return nullptr;
+}
+
+bool d_is_pressed_pause(int) { return false; }
+bool d_is_held_pause(int) { return false; }
+bool window_dead = true;
+void d_appear_yes_no(void*, const char16_t*) {
+    std::printf("MOCK prompt shown\n");
+    window_dead = false;  // waits for the player, who never answers here
+}
+bool d_is_selected_yes(const void*) { return false; }
+void d_start_movie(const char* name) { std::printf("MOCK movie %s\n", name); }
+bool d_is_active_movie() { return movie_active; }
+bool d_opening_camera() { return false; }
+const char* d_stage_name();
+
+// NebulaCutsceneSkip::update, cut down to its decisions.
+enum SkipState { Skip_Idle, Skip_Prompt, Skip_Skipping };
+SkipState skip_state = Skip_Idle;
+bool need_release = false;
+bool skippable() { return cutscene != 0 || movie_active; }
+void d_skip_update() {
+    auto pressed = through<bool (*)(int)>("?isPressedPause@MR@@YA_NH@Z");
+    auto held = through<bool (*)(int)>("?isHeldPause@MR@@YA_NH@Z");
+    auto appear = through<void (*)(void*, const char16_t*)>("?appearYesNoWithText@SysInfoWindow@@QEAAXPEB_S@Z");
+    auto yes = through<bool (*)(const void*)>("?isSelectedYes@SysInfoWindow@@QEBA_NXZ");
+    switch (skip_state) {
+    case Skip_Idle:
+        if (!held(0)) need_release = false;
+        if (need_release || !pressed(0)) break;
+        need_release = true;
+        if (!skippable()) {
+            std::printf("MOCK not offered\n");
+            break;
+        }
+        skip_state = Skip_Prompt;
+        appear(nullptr, u"Skip?");
+        break;
+    case Skip_Prompt:
+        if (!window_dead) break;
+        if (yes(nullptr) && skippable()) {
+            skip_state = Skip_Skipping;
+            std::printf("MOCK skipping\n");
+        } else {
+            skip_state = Skip_Idle;
+            std::printf("MOCK declined\n");
+        }
+        break;
+    case Skip_Skipping:
+        if (!skippable()) {
+            skip_state = Skip_Idle;
+            std::printf("MOCK skip done\n");
+        }
+        break;
+    }
+}
+bool d_is_skipping() { return skip_state == Skip_Skipping; }
 
 void save_store() {
     std::ofstream out(store_path, std::ios::trunc | std::ios::binary);
@@ -102,8 +179,22 @@ int32_t m_subscribe(NebulaModEvent event, NebulaModCallback callback, void* user
     subs[event].push_back({callback, user});
     return 0;
 }
-int32_t m_hook(void*, void*, void**) { return -1; }
-void* m_find(const char*) { return nullptr; }
+int32_t m_hook(void* target, void* replacement, void** original) {
+    for (Slot& slot : slots) {
+        if (slot.original == target) {
+            *original = slot.current;
+            slot.current = replacement;
+            return 0;
+        }
+    }
+    return -1;
+}
+void* m_find(const char* symbol) {
+    for (const Slot& slot : slots) {
+        if (std::strcmp(slot.symbol, symbol) == 0) return slot.original;
+    }
+    return nullptr;
+}
 NebulaActor* m_player() { return in_stage ? kPlayer : nullptr; }
 int32_t m_value(NebulaModValue what) {
     switch (what) {
@@ -166,7 +257,8 @@ int32_t m_store_get_text(const NebulaPlugin*, const char* key, char* out, int32_
     return n;
 }
 void m_store_set_text(const NebulaPlugin*, const char* key, const char* text) { text_store[key] = text; save_store(); }
-int32_t m_cutscene() { return 0; }
+int32_t m_cutscene() { return in_stage ? cutscene : 0; }
+const char* d_stage_name() { return stage.c_str(); }
 
 }  // namespace
 
@@ -213,6 +305,17 @@ int main(int argc, char** argv) {
     api.get_gravity = m_get_gravity;
     api.set_player_constant = m_set_constant;
     api.player_constant = m_constant;
+    const auto add = [](const char* symbol, void* fn) { slots.push_back({symbol, fn, fn}); };
+    add("?update@NebulaCutsceneSkip@@YAXXZ", reinterpret_cast<void*>(&d_skip_update));
+    add("?isSkipping@NebulaCutsceneSkip@@YA_NXZ", reinterpret_cast<void*>(&d_is_skipping));
+    add("?isPressedPause@MR@@YA_NH@Z", reinterpret_cast<void*>(&d_is_pressed_pause));
+    add("?isHeldPause@MR@@YA_NH@Z", reinterpret_cast<void*>(&d_is_held_pause));
+    add("?appearYesNoWithText@SysInfoWindow@@QEAAXPEB_S@Z", reinterpret_cast<void*>(&d_appear_yes_no));
+    add("?isSelectedYes@SysInfoWindow@@QEBA_NXZ", reinterpret_cast<void*>(&d_is_selected_yes));
+    add("?startMoviePlayer@MR@@YAXPEBD@Z", reinterpret_cast<void*>(&d_start_movie));
+    add("?isActiveMoviePlayer@MR@@YA_NXZ", reinterpret_cast<void*>(&d_is_active_movie));
+    add("?isExecScenarioOpeningCamera@GameSceneFunction@@YA_NXZ", reinterpret_cast<void*>(&d_opening_camera));
+    add("?getCurrentStageName@MR@@YAPEBDXZ", reinterpret_cast<void*>(&d_stage_name));
     static NebulaPlugin self{sizeof(NebulaPlugin), "archipelago", "0.1.0"};
     start(&api, &self);
 
@@ -225,6 +328,7 @@ int main(int argc, char** argv) {
             int n = 0;
             in >> n;
             for (int i = 0; i < n; ++i) {
+                through<void (*)()>("?update@NebulaCutsceneSkip@@YAXXZ")();  // GameSystem::update
                 fire(NEBULA_MOD_EVENT_FRAME, 0, nullptr);
                 if (cmd == "stage" && in_stage) fire(NEBULA_MOD_EVENT_STAGE_FRAME, 0, nullptr);
                 Sleep(16);
@@ -259,6 +363,13 @@ int main(int argc, char** argv) {
         } else if (cmd == "hit") {
             fire(NEBULA_MOD_EVENT_PLAYER_DAMAGE, 1, nullptr);
             set_mode(0);
+        } else if (cmd == "cutscene") {
+            in >> cutscene;
+        } else if (cmd == "movie") {
+            std::string name;
+            in >> name;
+            movie_active = name != "off";
+            if (movie_active) through<void (*)(const char*)>("?startMoviePlayer@MR@@YAXPEBD@Z")(name.c_str());
         } else if (cmd == "reset") {
             power = 0;
         } else if (cmd == "owned") {

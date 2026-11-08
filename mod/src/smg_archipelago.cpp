@@ -88,6 +88,9 @@ struct Config {
     bool persist_items_only = false;   // only those received as items
     std::set<int> untimed;             // power-ups whose timer is refused
     std::map<std::string, float> constants;  // the player table, for both characters
+    bool skip_cutscenes = false;              // answer Nebula's own cutscene skip with Yes, unasked
+    std::set<std::string> skip_never_movies;  // movies never skipped (the ending)
+    std::set<std::string> skip_never_stages;  // stages where nothing is skipped (where the ending plays)
 };
 
 // Read by hooks on any thread; written on the game's thread. A new config is built aside and swapped in.
@@ -290,6 +293,15 @@ void config_line(const std::vector<std::string>& w) {
         if (w[1] == "persist") c.persist = int_set(w[2]);
         if (w[1] == "persist_items_only") c.persist_items_only = w[2] == "1";
         if (w[1] == "untimed") c.untimed = int_set(w[2]);
+        if (w[1] == "skip_cutscenes") c.skip_cutscenes = w[2] == "1";
+        if (w[1] == "skip_never_movies") {
+            c.skip_never_movies.clear();
+            for (const std::string& movie : list(w[2])) c.skip_never_movies.insert(movie);
+        }
+        if (w[1] == "skip_never_stages") {
+            c.skip_never_stages.clear();
+            for (const std::string& stage : list(w[2])) c.skip_never_stages.insert(stage);
+        }
     } else if (w[0] == "CONST" && w.size() >= 3) {
         c.constants[w[1]] = static_cast<float>(std::atof(w[2].c_str()));
     }
@@ -575,6 +587,66 @@ bool hook_appear_luigi(const void* self, int id) {
     return (file_is_luigi != nullptr && file_is_luigi(self, id)) || luigi_open();
 }
 
+// ---- Skipping cutscenes, with Nebula's own skip (NebulaCutsceneSkip): while a cutscene plays, its update sees + pressed
+// once, and its Yes/No question is answered Yes without being shown. What it skips, and how, is all its own.
+void (*orig_skip_update)() = nullptr;
+bool (*orig_is_pressed_pause)(int) = nullptr;
+bool (*orig_is_held_pause)(int) = nullptr;
+void (*orig_appear_yes_no)(void*, const char16_t*) = nullptr;
+bool (*orig_is_selected_yes)(const void*) = nullptr;
+void (*orig_start_movie)(const char*) = nullptr;
+bool (*skip_is_skipping)() = nullptr;
+bool (*movie_is_active)() = nullptr;
+bool (*opening_camera_is_on)() = nullptr;
+
+bool g_in_skip_update = false;  // inside NebulaCutsceneSkip::update
+bool g_skip_press = false;      // this update sees + pressed
+bool g_skip_press_next = false; // the next one should
+bool g_skip_answer = false;     // its question was ours: answer Yes
+std::string g_stage_name;       // the last stage started (from its event, so known from its first frame)
+std::string g_movie;            // the movie playing, by its path
+
+void hook_skip_update() {
+    g_in_skip_update = true;
+    g_skip_press = g_skip_press_next;
+    g_skip_press_next = false;
+    orig_skip_update();
+    g_skip_press = false;
+    g_in_skip_update = false;
+}
+
+bool hook_is_pressed_pause(int channel) {
+    if (g_in_skip_update && g_skip_press) return true;
+    return orig_is_pressed_pause(channel);
+}
+
+bool hook_is_held_pause(int channel) {
+    if (g_in_skip_update && g_skip_press) return false;  // a fresh press: one held before doesn't block it
+    return orig_is_held_pause(channel);
+}
+
+void hook_appear_yes_no(void* self, const char16_t* text) {
+    if (g_in_skip_update && g_skip_press) {
+        g_skip_answer = true;  // never shown: the skip goes on as after Yes
+        log("skipping a cutscene");
+        return;
+    }
+    orig_appear_yes_no(self, text);
+}
+
+bool hook_is_selected_yes(const void* self) {
+    if (g_in_skip_update && g_skip_answer) {
+        g_skip_answer = false;
+        return true;
+    }
+    return orig_is_selected_yes(self);
+}
+
+void hook_start_movie(const char* name) {
+    g_movie = name != nullptr ? name : "";
+    orig_start_movie(name);
+}
+
 // Same-galaxy redirects, decided as the star select hands over: no second load.
 Star g_hook_entry;
 Star g_hook_target;
@@ -662,6 +734,7 @@ int32_t on_stage_start(const NebulaModEventData* data, void*) {
     g_power_try = -1000;  // counted in this stage's frames
     g_stage_ending = false;
     g_spawns.clear();  // a group belongs to the stage it was dropped in
+    g_stage_name = data->name != nullptr ? data->name : "";
     const std::shared_ptr<const Config> c = config();
     if (!c || data->name == nullptr) return data->value;
     apply_fixes();
@@ -891,8 +964,30 @@ int32_t on_stage_frame(const NebulaModEventData* data, void*) {
     return data->value;
 }
 
+int g_menu_frames = 0;
+int g_skip_try = -1000;
+
+// Whether to press + for Nebula's skip this frame: a cutscene plays that isn't the ending. Nebula itself decides
+// whether that cutscene can be skipped, and does nothing when it can't; asked again every half second.
+void think_about_skipping() {
+    const std::shared_ptr<const Config> c = config();
+    if (!c || !c->skip_cutscenes || orig_skip_update == nullptr) return;
+    if (skip_is_skipping != nullptr && skip_is_skipping()) return;
+    if (g_menu_frames - g_skip_try < 30) return;
+    const bool stage_live = g_stage_frames > 0 && !g_stage_ending;
+    const bool movie = movie_is_active != nullptr && movie_is_active();
+    if (movie && c->skip_never_movies.count(g_movie) != 0) return;
+    if (c->skip_never_stages.count(g_stage_name) != 0) return;
+    const bool opening = stage_live && opening_camera_is_on != nullptr && opening_camera_is_on();
+    if (!movie && !opening && game->is_cutscene_playing() == 0) return;
+    g_skip_try = g_menu_frames;
+    g_skip_press_next = true;
+}
+
 int32_t on_frame(const NebulaModEventData* data, void*) {
+    ++g_menu_frames;
     pump();
+    think_about_skipping();
     return data->value;
 }
 
@@ -931,6 +1026,35 @@ NEBULA_PLUGIN_ENTRY(api, self) {
     current_stage_name = reinterpret_cast<const char* (*)()>(game->find_function("?getCurrentStageName@MR@@YAPEBDXZ"));
     if (current_stage_name != nullptr) {
         install(set_scenario, &hook_set_scenario, &orig_set_scenario, "MR::setCurrentScenarioNo");
+    }
+
+    static const char* const skip_update[] = {"?update@NebulaCutsceneSkip@@YAXXZ", nullptr};
+    static const char* const pressed_pause[] = {"?isPressedPause@MR@@YA_NH@Z", nullptr};
+    static const char* const held_pause[] = {"?isHeldPause@MR@@YA_NH@Z", nullptr};
+    static const char* const appear_yes_no[] = {"?appearYesNoWithText@SysInfoWindow@@QEAAXPEB_S@Z", nullptr};
+    static const char* const selected_yes[] = {"?isSelectedYes@SysInfoWindow@@QEBA_NXZ", nullptr};
+    static const char* const start_movie[] = {"?startMoviePlayer@MR@@YAXPEBD@Z", nullptr};
+    skip_is_skipping = reinterpret_cast<bool (*)()>(game->find_function("?isSkipping@NebulaCutsceneSkip@@YA_NXZ"));
+    movie_is_active = reinterpret_cast<bool (*)()>(game->find_function("?isActiveMoviePlayer@MR@@YA_NXZ"));
+    opening_camera_is_on =
+        reinterpret_cast<bool (*)()>(game->find_function("?isExecScenarioOpeningCamera@GameSceneFunction@@YA_NXZ"));
+    // All or none: half of them would press + with nothing to answer the question.
+    const bool skip_hooks = game->find_function(skip_update[0]) != nullptr && game->find_function(pressed_pause[0]) != nullptr &&
+                            game->find_function(held_pause[0]) != nullptr && game->find_function(appear_yes_no[0]) != nullptr &&
+                            game->find_function(selected_yes[0]) != nullptr && game->find_function(start_movie[0]) != nullptr;
+    if (skip_hooks) {
+        install(pressed_pause, &hook_is_pressed_pause, &orig_is_pressed_pause, "MR::isPressedPause");
+        install(held_pause, &hook_is_held_pause, &orig_is_held_pause, "MR::isHeldPause");
+        install(appear_yes_no, &hook_appear_yes_no, &orig_appear_yes_no, "SysInfoWindow::appearYesNoWithText");
+        install(selected_yes, &hook_is_selected_yes, &orig_is_selected_yes, "SysInfoWindow::isSelectedYes");
+        install(start_movie, &hook_start_movie, &orig_start_movie, "MR::startMoviePlayer");
+        if (orig_is_pressed_pause == nullptr || orig_is_held_pause == nullptr || orig_appear_yes_no == nullptr ||
+            orig_is_selected_yes == nullptr || orig_start_movie == nullptr ||
+            !install(skip_update, &hook_skip_update, &orig_skip_update, "NebulaCutsceneSkip::update")) {
+            orig_skip_update = nullptr;  // cutscene skipping stays off
+        }
+    } else {
+        log("this Nebula has no cutscene skip to drive: Skip Cutscenes does nothing");
     }
 
     game->subscribe(NEBULA_MOD_EVENT_FRAME, on_frame, nullptr);

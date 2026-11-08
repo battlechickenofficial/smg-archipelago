@@ -138,6 +138,10 @@ class SMGContext(CommonContext):
         self.game_send("OPTION", "untimed", ",".join(str(m) for m in power.get("untimed", [])) or "-")
         for name, value in (power.get("constants") or {}).items():
             self.game_send("CONST", name, value)
+        skip = sd.get("skip_cutscenes") or {}
+        self.game_send("OPTION", "skip_cutscenes", int(bool(skip.get("enabled"))))
+        self.game_send("OPTION", "skip_never_movies", ",".join(skip.get("never_movies", [])) or "-")
+        self.game_send("OPTION", "skip_never_stages", ",".join(skip.get("never_stages", [])) or "-")
         self.game_send("COMMIT")
         for index, item in enumerate(self.items_received):
             self.send_item(index, item, announce=False)
