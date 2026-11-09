@@ -286,23 +286,54 @@ class Enemy:
     on: bool         # in enemy traps unless the YAML says otherwise
     low: int         # the fewest in a group
     high: int        # the most in a group
+    # Whether the game can make it outside a level's own placement (traps ready theirs as each stage loads, with no
+    # placement data). Meramera's setup reads its placement's name unchecked (MR::isEqualObjectName): it crashes.
+    works: bool = True
+    # Its class in the game's code, where that differs from the object name (for its after-placement setup).
+    cls: str = ""
+    # How a defeated one comes back for another trap, in its starting state:
+    #   "appear": its own appear() puts it back in its starting state;
+    #   a symbol: that member, given no placement, does (called before it appears);
+    #   "none": it can't be, so defeated ones stay defeated (ones still out are moved instead).
+    reset: str = "none"
+    # How a trap puts it out, after setting it on the floor round the player: steps, each a name and its values (joined
+    # by "="), done in order. {drop_height} and {drop_wait} are the Thwomp options.
+    #   at_player=<spacing>: the first right where the player is, the rest further out by this.
+    #   upright: stood up to the planet there (its rotation, then its base matrix).
+    #   ground=<offset>: the floor point written into the object at this offset (three floats).
+    #   f32=<offset>=<value>, i32=<offset>=<value>: a value written into the object.
+    #   reappear: its appear() called even when it's already out (it starts over from where it now is).
+    #   no_rail: sent to its rail's start, it stays put (made with no placement, it has no rail).
+    #   warp=<nearest>=<furthest>: as it hides (to move along its rail, which it hasn't got), it moves somewhere round
+    #   the player instead, between these distances.
+    place: Tuple[str, ...] = ()
+
+
+# A Thwomp (Dossun, as this build lays it out): where it lands, 3 floats at 0xEC (it rises from there by its height
+# along its up, and starts up there on appear()); its height, a float at 0x100; how long it waits up top before falling,
+# in frames, an int at 0x104.
+THWOMP_PLACE: Tuple[str, ...] = (
+    "at_player=450", "upright", "ground=0xEC", "f32=0x100={drop_height}", "i32=0x104={drop_wait}", "reappear",
+)
+# A Magikoopa (Kameck): no rail to start on or move along, so it warps round the player between spells instead.
+MAGIKOOPA_PLACE: Tuple[str, ...] = ("no_rail", "warp=500=1000")
 
 
 ENEMIES: Tuple[Enemy, ...] = (
-    Enemy("Goomba", "Kuribo", True, 3, 8),
+    Enemy("Goomba", "Kuribo", True, 3, 8, reset="?initAppearState@Kuribo@@QEAAXAEBVTableIter@@@Z"),
     Enemy("Dry Bones", "Karon", True, 2, 5),
-    Enemy("Boo", "Teresa", True, 2, 6),
-    Enemy("Bob-omb", "BombHei", True, 2, 6),
+    Enemy("Boo", "Teresa", True, 2, 6, reset="appear"),
+    Enemy("Bob-omb", "BombHei", True, 2, 6, reset="appear"),
     Enemy("Octoomba", "Takobo", True, 2, 5),
-    Enemy("Spiky Topman", "BegomanSpike", True, 2, 5),
-    Enemy("Spring Topman", "BegomanSpring", True, 2, 5),
-    Enemy("Topmini", "BegomanBaby", True, 3, 8),
-    Enemy("Li'l Cinder", "Meramera", True, 2, 5),
-    Enemy("Magikoopa", "Kameck", True, 1, 2),
+    Enemy("Spiky Topman", "BegomanSpike", True, 2, 5, reset="appear"),
+    Enemy("Spring Topman", "BegomanSpring", True, 2, 5, reset="appear"),
+    Enemy("Topmini", "BegomanBaby", True, 3, 8, reset="appear"),
+    Enemy("Li'l Cinder", "Meramera", False, 2, 5, works=False),
+    Enemy("Magikoopa", "FireBallBeamKameck", False, 1, 2, cls="Kameck", reset="appear", place=MAGIKOOPA_PLACE),
     Enemy("Monty Mole", "Mogu", False, 1, 3),
-    Enemy("Urchin", "UnizoLand", False, 2, 4),
+    Enemy("Urchin", "UnizoLand", False, 2, 4, cls="Unizo", reset="appear"),
     Enemy("Cluckboom", "Poihana", False, 1, 2),
-    Enemy("Thwomp", "Dossun", False, 1, 1),
+    Enemy("Thwomp", "Dossun", False, 1, 1, reset="appear", place=THWOMP_PLACE),
     Enemy("Blooper", "Gesso", False, 2, 4),
     Enemy("Jellyfish", "Jellyfish", False, 2, 4),
 )
@@ -320,6 +351,10 @@ POWER_UPS: Dict[str, int] = {
     "Rainbow Star": 1,
 }
 RAINBOW_STAR = 1
+# The Life Mushroom: given as the game's own pickup (MarioAccess::changeItemStatus), by its item number there.
+LIFE_MUSHROOM = "Life Mushroom"
+LIFE_MUSHROOM_ITEM_STATUS = 10
+POWER_UP_ITEM_NAMES: Tuple[str, ...] = tuple(POWER_UPS) + (LIFE_MUSHROOM,)
 # The power-ups that run out on a timer (the Rainbow Star does too, and is left to).
 TIMED_POWER_UPS: Tuple[int, ...] = (2, 3, 7)
 # The player table's timers for those (a u16 of frames): raised to their most when power-ups are untimed.

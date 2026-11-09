@@ -34,7 +34,7 @@
 
 namespace {
 
-const char* const kVersion = "0.1.0";
+const char* const kVersion = "0.2.3";
 
 const NebulaModApi* game = nullptr;
 const NebulaPlugin* me = nullptr;
@@ -91,6 +91,19 @@ struct Config {
     bool skip_cutscenes = false;              // answer Nebula's own cutscene skip with Yes, unasked
     std::set<std::string> skip_never_movies;  // movies never skipped (the ending)
     std::set<std::string> skip_never_stages;  // stages where nothing is skipped (where the ending plays)
+    bool skip_prologue = false;               // close the new file's story time (picture book, Peach's letter)
+    bool spin_from_start = false;             // the spin allowed before the story gives it
+    struct PoolEntry {
+        std::string object;  // the name the game makes it by
+        int count;           // how many each stage keeps ready
+        std::string cls;     // its class, for its after-placement setup
+        std::string reset;   // how a defeated one comes back: "appear", "none", or a member to call (see the world's data)
+        // How it's put out, step by step, each a name and its values (see the world's data): at_player, upright,
+        // ground=<offset>, f32=<offset>=<value>, i32=<offset>=<value>, reappear, no_rail, warp=<near>=<far>.
+        std::vector<std::vector<std::string>> place;
+    };
+    std::vector<PoolEntry> enemy_pool;  // trap enemies each stage keeps ready
+    std::vector<std::pair<std::string, std::string>> texts;  // the game's messages by id, in place of its own
 };
 
 // Read by hooks on any thread; written on the game's thread. A new config is built aside and swapped in.
@@ -192,6 +205,7 @@ void save_fixes() {
 // ------------------------------------------------------------------------------------------------ the client's lines
 
 std::shared_ptr<Config> g_building;  // between BEGIN and COMMIT
+std::string g_client_version;        // the mod version the connected client is made for
 std::string g_building_text;
 
 struct Pending {                     // an item to apply in a stage, where the player is
@@ -202,6 +216,7 @@ struct Pending {                     // an item to apply in a stage, where the p
     std::string object;              // an enemy trap's object
 };
 std::deque<Pending> g_pending;
+void forget_trap_actors();
 std::deque<std::string> g_messages;
 bool g_kill_requested = false;
 bool g_dying_from_link = false;
@@ -294,6 +309,24 @@ void config_line(const std::vector<std::string>& w) {
         if (w[1] == "persist_items_only") c.persist_items_only = w[2] == "1";
         if (w[1] == "untimed") c.untimed = int_set(w[2]);
         if (w[1] == "skip_cutscenes") c.skip_cutscenes = w[2] == "1";
+        if (w[1] == "skip_prologue") c.skip_prologue = w[2] == "1";
+        if (w[1] == "spin_from_start") c.spin_from_start = w[2] == "1";
+        if (w[1] == "enemy_pool") {
+            c.enemy_pool.clear();
+            for (const std::string& entry : list(w[2])) {
+                const std::vector<std::string> p = split(entry, ':');  // object:count[:class]
+                if (p.size() >= 2) {
+                    Config::PoolEntry e{p[0], std::clamp(to_int(p[1]), 0, 200), p.size() >= 3 && !p[2].empty() ? p[2] : p[0],
+                                        p.size() >= 4 && !p[3].empty() ? p[3] : "none", {}};
+                    if (p.size() >= 5 && !p[4].empty() && p[4] != "-") {
+                        for (const std::string& step : split(p[4], '|')) {
+                            if (!step.empty()) e.place.push_back(split(step, '='));
+                        }
+                    }
+                    c.enemy_pool.push_back(e);
+                }
+            }
+        }
         if (w[1] == "skip_never_movies") {
             c.skip_never_movies.clear();
             for (const std::string& movie : list(w[2])) c.skip_never_movies.insert(movie);
@@ -302,6 +335,8 @@ void config_line(const std::vector<std::string>& w) {
             c.skip_never_stages.clear();
             for (const std::string& stage : list(w[2])) c.skip_never_stages.insert(stage);
         }
+    } else if (w[0] == "TEXT" && w.size() >= 3) {
+        c.texts.emplace_back(w[1], w[2]);
     } else if (w[0] == "CONST" && w.size() >= 3) {
         c.constants[w[1]] = static_cast<float>(std::atof(w[2].c_str()));
     }
@@ -329,6 +364,9 @@ void apply_constants(const Config& c) {
 void commit(bool from_store) {
     if (!g_building) return;
     apply_constants(*g_building);
+    if (game->add_text != nullptr) {
+        for (const auto& [id, text] : g_building->texts) game->add_text(id.c_str(), text.c_str());
+    }
     {
         Exclusive hold(&g_lock);
         g_config = g_building;
@@ -343,22 +381,51 @@ void commit(bool from_store) {
     g_building_text.clear();
 }
 
+// What the player sees of the connection: whether the client is there, and whether it's in a multiworld.
+bool g_status_messages = true;  // the mod option "status"
+int g_server_state = -1;        // the client's last STATUS: -1 not told yet, 0 no multiworld, 1 in one
+bool g_had_client = false;      // the client was connected (so losing it is worth saying)
+
+void status_message(const std::string& text) {
+    log(text);
+    if (g_status_messages) g_messages.push_back(text);
+}
+
 void client_line(const std::string& line) {
     std::vector<std::string> w = split(line, '\t');
     if (w.empty() || w[0].empty()) return;
     const std::string& cmd = w[0];
     if (cmd == "HELLO") {
         send_line(std::string("HELLO\t") + kVersion);
+    } else if (cmd == "STATUS" && w.size() >= 3) {
+        const int state = w[1] == "1" ? 1 : 0;
+        if (state != g_server_state) {
+            if (state == 1) {
+                status_message("Connected to Archipelago" + (w[2] != "-" ? " as " + w[2] : std::string()) + ".");
+            } else {
+                status_message(g_server_state == 1 ? "The Archipelago client lost the server."
+                                                   : "Archipelago client found: connect it to a server.");
+            }
+            g_server_state = state;
+        }
+    } else if (cmd == "CLIENT" && w.size() >= 2) {
+        g_client_version = w[1];
     } else if (cmd == "SEED" && w.size() >= 2) {
         if (w[1] != g_seed) forget_seed(w[1]);
     } else if (cmd == "BEGIN") {
         g_building = std::make_shared<Config>();
         g_building_text.clear();
     } else if (cmd == "RULE" || cmd == "LUIGIRULE" || cmd == "REDIRECT" || cmd == "KEEP" || cmd == "OPTION" ||
-               cmd == "CONST") {
+               cmd == "CONST" || cmd == "TEXT") {
         config_line(w);
         g_building_text += line + "\n";
     } else if (cmd == "COMMIT") {
+        if (g_client_version != kVersion) {
+            // An older client still running after an update speaks the old mod's language: its settings may be read wrong.
+            log("the Archipelago client is for mod " + (g_client_version.empty() ? std::string("0.1") : g_client_version) +
+                ", this mod is " + kVersion + ": restart the client from the Archipelago Launcher");
+            g_messages.push_back("Restart the Archipelago client: it's older than this mod.");
+        }
         commit(false);
         report_all_stars();
     } else if (cmd == "TOKEN" && w.size() >= 2) {
@@ -426,12 +493,20 @@ void load_store() {
 
 SOCKET g_socket = INVALID_SOCKET;
 bool g_connecting = false;
+ULONGLONG g_next_ping = 0;  // the next PING: where the player is, so the client knows the game is alive
 ULONGLONG g_next_try = 0;
 std::string g_in;
 std::string g_out;
 int g_port = 43770;
 
 void disconnect() {
+    g_client_version.clear();
+    if (g_had_client) {
+        g_had_client = false;
+        status_message("Lost the Archipelago client: items and checks wait until it's back.");
+    }
+    g_server_state = -1;
+    g_next_ping = 0;
     if (g_socket != INVALID_SOCKET) closesocket(g_socket);
     g_socket = INVALID_SOCKET;
     g_connecting = false;
@@ -439,6 +514,8 @@ void disconnect() {
     g_out.clear();
     g_next_try = GetTickCount64() + 3000;
 }
+
+std::string where_the_player_is();
 
 void send_line(const std::string& line) {
     if (g_socket != INVALID_SOCKET) g_out += line + "\n";
@@ -481,8 +558,13 @@ void pump() {
             return;
         }
         g_connecting = false;
+        g_had_client = true;
         log("connected to the Archipelago client");
         send_line(std::string("HELLO\t") + kVersion);
+    }
+    if (GetTickCount64() >= g_next_ping) {
+        g_next_ping = GetTickCount64() + 2000;
+        send_line(std::string("PING\t") + where_the_player_is());
     }
     char buffer[4096];
     for (;;) {
@@ -557,6 +639,36 @@ bool hook_function_is_on(const char* name) {
         return rule_holds(*rule, [](const char* flag) { return orig_function_is_on(flag); });
     }
     return orig_function_is_on(name);
+}
+
+// "Could it open now": a dome shows such a galaxy as new and lets the player in. The same rule as "is it open".
+bool (*orig_checker_can_on)(const void*, const char*) = nullptr;
+bool (*orig_holder_can_on)(const void*, const char*) = nullptr;
+bool (*orig_function_can_on)(const char*) = nullptr;
+
+bool hook_checker_can_on(const void* self, const char* name) {
+    const std::shared_ptr<const Config> c = config();
+    if (const Rule* rule = rule_for(c.get(), name)) {
+        return rule_holds(*rule, [self](const char* flag) { return orig_checker_is_on != nullptr ? orig_checker_is_on(self, flag)
+                                                                                                : game->is_event_flag_on(flag) != 0; });
+    }
+    return orig_checker_can_on(self, name);
+}
+
+bool hook_holder_can_on(const void* self, const char* name) {
+    const std::shared_ptr<const Config> c = config();
+    if (const Rule* rule = rule_for(c.get(), name)) {
+        return rule_holds(*rule, [](const char* flag) { return game->is_event_flag_on(flag) != 0; });
+    }
+    return orig_holder_can_on(self, name);
+}
+
+bool hook_function_can_on(const char* name) {
+    const std::shared_ptr<const Config> c = config();
+    if (const Rule* rule = rule_for(c.get(), name)) {
+        return rule_holds(*rule, [](const char* flag) { return game->is_event_flag_on(flag) != 0; });
+    }
+    return orig_function_can_on(name);
 }
 
 bool hook_galaxy_open(const char* name) {
@@ -647,6 +759,41 @@ void hook_start_movie(const char* name) {
     orig_start_movie(name);
 }
 
+// The spin: the game forbids it each stage until its story gives it (GameSequenceProgress).
+void (*orig_swing_permission)(bool) = nullptr;
+
+void hook_swing_permission(bool permission) {
+    const std::shared_ptr<const Config> c = config();
+    orig_swing_permission(permission || (c && c->spin_from_start));
+}
+
+// The new file's story time, closed as soon as it opens: the prologue goes on as if it had been read.
+void (*orig_picture_book_appear)(void*) = nullptr;
+void (*orig_letter_appear)(void*) = nullptr;
+void (*picture_book_kill)(void*) = nullptr;
+void (*letter_kill)(void*) = nullptr;
+
+bool skip_prologue_now() {
+    const std::shared_ptr<const Config> c = config();
+    return c && c->skip_prologue;
+}
+
+void hook_picture_book_appear(void* self) {
+    orig_picture_book_appear(self);
+    if (skip_prologue_now() && picture_book_kill != nullptr) {
+        log("skipping the story time");
+        picture_book_kill(self);
+    }
+}
+
+void hook_letter_appear(void* self) {
+    orig_letter_appear(self);
+    if (skip_prologue_now() && letter_kill != nullptr) {
+        log("skipping Peach's letter");
+        letter_kill(self);
+    }
+}
+
 // Same-galaxy redirects, decided as the star select hands over: no second load.
 Star g_hook_entry;
 Star g_hook_target;
@@ -705,8 +852,22 @@ int g_last_damage = -1000;  // the frame of the last hit
 bool g_applying = false;    // the plugin itself is changing the power-up
 int g_power_try = -1000;    // the frame of the last attempt to give a power-up
 std::deque<std::string> g_spawns;  // enemies of traps still to drop
+NebulaActor* g_spawn_check = nullptr;  // the first of the last group, looked at again a second later
+std::string g_spawn_check_object;
+int g_spawn_check_frame = 0;
 int g_spawned = 0;          // of the current group, for spreading them out
 int g_spawn_wait = 0;
+
+// Which dome a galaxy is in: the game asks it to choose where a cleared (or left) galaxy returns to.
+uint32_t (*orig_dome_of)(const char*) = nullptr;
+
+uint32_t hook_dome_of(const char* galaxy) {
+    if (galaxy != nullptr && g_in_redirect && config() && g_current_played.first == galaxy &&
+        g_current_entry.first != g_current_played.first) {
+        return orig_dome_of(g_current_entry.first.c_str());
+    }
+    return orig_dome_of(galaxy);
+}
 
 void apply_fixes() {
     if (g_fixes.empty()) return;
@@ -734,6 +895,7 @@ int32_t on_stage_start(const NebulaModEventData* data, void*) {
     g_power_try = -1000;  // counted in this stage's frames
     g_stage_ending = false;
     g_spawns.clear();  // a group belongs to the stage it was dropped in
+    g_spawn_check = nullptr;
     g_stage_name = data->name != nullptr ? data->name : "";
     const std::shared_ptr<const Config> c = config();
     if (!c || data->name == nullptr) return data->value;
@@ -805,6 +967,8 @@ int32_t on_star_get(const NebulaModEventData* data, void*) {
 
 int32_t on_stage_end(const NebulaModEventData* data, void*) {
     g_stage_ending = true;
+    // Its objects are going: the next stage's may take their places in memory before its own trap enemies are made.
+    forget_trap_actors();
     if (config()) apply_fixes();
     return data->value;
 }
@@ -848,7 +1012,23 @@ int32_t on_player_miss(const NebulaModEventData* data, void*) {
     return data->value;
 }
 
-void apply_item(const Pending& p) {
+void (*g_change_item_status)(int) = nullptr;     // the game's own item pickup, by its item number
+bool (*g_can_change_state)(NebulaActor*) = nullptr;  // whether the player can take one now
+
+// False: not now (the player can't take it yet); it's tried again next frame.
+bool apply_item(const Pending& p) {
+    if (p.kind == "GIVE" && p.what == "life_up") {
+        // The Life Mushroom, as if picked up: its own little scene and the extra health (a full refill if it's had).
+        NebulaActor* player = game->player();
+        if (player == nullptr || (g_can_change_state != nullptr && !g_can_change_state(player))) return false;
+        if (g_change_item_status != nullptr) {
+            g_change_item_status(p.amount);
+        } else {
+            game->set_value(NEBULA_SET_MAX_LIFE, 6);
+            game->set_value(NEBULA_SET_LIFE, 6);
+        }
+        return true;
+    }
     if (p.kind == "POWERUP") {
         set_power_wanted(p.amount);
         g_power_try = -1000;
@@ -875,38 +1055,339 @@ void apply_item(const Pending& p) {
             log("enemy trap: " + std::to_string(p.amount) + " " + p.object);
         }
     }
+    return true;
 }
 
-// One enemy of a trap's group, dropped above the player, each a little further round a ring.
-void spawn_next() {
-    NebulaActor* player = game->player();
-    if (player == nullptr || game->spawn == nullptr) return;
+// The game's own calls for an actor's visibility. A level's enemies join the clipping system as the stage loads; one
+// made in play is kept out of it (always run and drawn), as Nebula's own spawned objects are.
+using ActorTest = bool (*)(NebulaActor*);
+using ActorCall = void (*)(NebulaActor*);
+ActorCall g_invalidate_clipping = nullptr;
+ActorTest g_is_clipped = nullptr;
+ActorTest g_is_hidden_model = nullptr;
+ActorCall g_show_model = nullptr;
+
+// ---- Enemy traps' enemies. The game takes on new objects only while a stage loads: as it finishes, it sizes its
+// draw lists and connects every object to what moves and draws (SceneFunction::allocateDrawBufferActorList). An object
+// made after that is never drawn or run, and drawing a model the stage had no room for crashes. So, as each stage loads,
+// the mod makes the trap enemies it may need (each enemy, as many as its largest group) and puts them away hidden, as
+// the game's own summoners do with theirs; a trap takes some, moves them next to the player and shows them.
+void (*orig_allocate_draw_lists)() = nullptr;
+void* (*(*g_get_creator)(const char*))(const char*) = nullptr;
+void (*g_mount_archives)(const char*, const void*) = nullptr;
+void (*g_init_without_iter)(void*) = nullptr;
+void (*g_make_dead)(void*) = nullptr;
+void (*g_set_zone)(int) = nullptr;
+void (*g_clear_zone)() = nullptr;
+
+std::map<std::string, std::vector<NebulaActor*>> g_pool;  // this stage's hidden enemies, by object name
+std::map<std::string, size_t> g_pool_next;                // the next one to reuse when all are out
+std::map<std::string, std::string> g_pool_class;          // each object's class
+std::map<std::string, std::string> g_pool_reset;          // each object's way back from defeat
+std::set<NebulaActor*> g_pool_used;                       // ones a trap has put out at least once
+using Steps = std::vector<std::vector<std::string>>;
+std::map<std::string, Steps> g_pool_place;                // each object's placement steps
+std::set<NebulaActor*> g_no_rail;                         // ones kept where they are when sent to a rail they lack
+std::map<NebulaActor*, std::pair<float, float>> g_warp;   // ones that, hiding, move round the player (nearest, furthest)
+int g_warps = 0;
+
+const std::vector<std::string>* find_step(const Steps& steps, const char* name) {
+    for (const std::vector<std::string>& step : steps) {
+        if (!step.empty() && step[0] == name) return &step;
+    }
+    return nullptr;
+}
+
+float to_float(const std::string& text, float otherwise) {
+    char* end = nullptr;
+    const float value = std::strtof(text.c_str(), &end);
+    return end != text.c_str() ? value : otherwise;
+}
+
+// A field's place in an object, as the world gives it (0x.. or decimal); -1 for none worth trusting.
+long field_offset(const std::string& text) {
+    char* end = nullptr;
+    const long value = std::strtol(text.c_str(), &end, 0);
+    return end != text.c_str() && value >= 0x20 && value < 0x2000 ? value : -1;
+}
+std::set<std::string> g_pool_names;                       // names the game keeps pointers to
+
+void fill_pool(const Config& c) {
+    g_pool.clear();
+    g_pool_next.clear();
+    g_pool_class.clear();
+    g_pool_reset.clear();
+    g_pool_used.clear();
+    g_pool_place.clear();
+    g_no_rail.clear();
+    g_warp.clear();
+    if (c.enemy_pool.empty() || g_get_creator == nullptr || g_init_without_iter == nullptr || g_make_dead == nullptr) return;
+    const char* stage = current_stage_name != nullptr ? current_stage_name() : nullptr;
+    if (stage == nullptr || stage[0] == '\0' || std::strcmp(stage, "FileSelect") == 0) return;
+    struct NoPlacement {  // a TableIter that points at nothing
+        const void* table = nullptr;
+        int32_t index = -1;
+    } no_placement;
+    int made = 0;
+    for (const Config::PoolEntry& entry : c.enemy_pool) {
+        const std::string& object = entry.object;
+        const int count = entry.count;
+        g_pool_class[object] = entry.cls;
+        g_pool_reset[object] = entry.reset;
+        g_pool_place[object] = entry.place;
+        const std::vector<std::string>* warp = find_step(entry.place, "warp");
+        const bool no_rail = find_step(entry.place, "no_rail") != nullptr;
+        const char* name = g_pool_names.insert(object).first->c_str();
+        auto create = g_get_creator(name);
+        if (create == nullptr) {
+            log("no " + object + " in this game: left out of enemy traps");
+            continue;
+        }
+        if (g_mount_archives != nullptr) g_mount_archives(name, &no_placement);
+        std::vector<NebulaActor*>& pool = g_pool[object];
+        for (int i = 0; i < count; ++i) {
+            if (g_set_zone != nullptr) g_set_zone(0);
+            void* enemy = create(name);
+            if (enemy != nullptr) {
+                g_init_without_iter(enemy);
+                g_make_dead(enemy);
+                NebulaActor* actor = reinterpret_cast<NebulaActor*>(enemy);
+                pool.push_back(actor);
+                if (no_rail) g_no_rail.insert(actor);
+                if (warp != nullptr) {
+                    const float near_ = warp->size() >= 2 ? to_float((*warp)[1], 500.0f) : 500.0f;
+                    const float far_ = warp->size() >= 3 ? to_float((*warp)[2], near_) : near_;
+                    g_warp[actor] = {std::min(near_, far_), std::max(near_, far_)};
+                }
+                ++made;
+            }
+            if (g_clear_zone != nullptr) g_clear_zone();
+        }
+    }
+    log(std::string("enemy traps: ") + std::to_string(made) + " enemies made ready in " + stage);
+}
+
+void hook_allocate_draw_lists() {
+    const std::shared_ptr<const Config> c = config();
+    if (c) fill_pool(*c);
+    orig_allocate_draw_lists();
+}
+
+// A hidden one: never put out yet, or defeated and able to come back (it's put back in its starting state). Else the one
+// out longest, which moves to the new spot. Null only when every one is defeated for good.
+NebulaActor* take_from_pool(const std::string& object) {
+    const auto it = g_pool.find(object);
+    if (it == g_pool.end() || it->second.empty()) return nullptr;
+    std::vector<NebulaActor*>& pool = it->second;
+    const std::string& reset = g_pool_reset[object];
+    size_t& next = g_pool_next[object];
+    for (size_t i = 0; i < pool.size(); ++i) {
+        NebulaActor* enemy = pool[(next + i) % pool.size()];
+        if (game->is_dead(enemy) == 0) continue;
+        const bool fresh = g_pool_used.count(enemy) == 0;
+        if (!fresh && reset == "none") continue;
+        if (!fresh && reset != "appear") {
+            // A member that puts it back in its starting state, given no placement (as at its setup).
+            struct NoPlacement {
+                const void* table = nullptr;
+                int32_t index = -1;
+            } no_placement;
+            if (auto start = reinterpret_cast<void (*)(NebulaActor*, const void*)>(game->find_function(reset.c_str()))) {
+                start(enemy, &no_placement);
+            } else {
+                continue;
+            }
+        }
+        next = (next + i + 1) % pool.size();
+        g_pool_used.insert(enemy);
+        return enemy;
+    }
+    for (size_t i = 0; i < pool.size(); ++i) {
+        NebulaActor* enemy = pool[(next + i) % pool.size()];
+        if (game->is_dead(enemy) != 0) continue;
+        next = (next + i + 1) % pool.size();
+        return enemy;
+    }
+    return nullptr;
+}
+
+std::string visibility(NebulaActor* actor) {
+    std::string out;
+    if (g_is_clipped != nullptr) out += g_is_clipped(actor) ? ", clipped" : ", not clipped";
+    if (g_is_hidden_model != nullptr) out += g_is_hidden_model(actor) ? ", model hidden" : ", model shown";
+    return out;
+}
+
+// Where the player stands: the planet's up there, and two directions across it.
+struct PlayerFrame {
     float at[3];
+    float up[3];
+    float u[3];
+    float v[3];
+};
+
+bool player_frame(PlayerFrame& f) {
+    NebulaActor* player = game->player();
+    if (player == nullptr) return false;
     float down[3] = {0.0f, -1.0f, 0.0f};
-    game->get_position(player, at);
+    game->get_position(player, f.at);
     if (game->get_gravity != nullptr) game->get_gravity(player, down);
-    const float up[3] = {-down[0], -down[1], -down[2]};
-    // Two directions across "up", for the ring.
+    for (int i = 0; i < 3; ++i) f.up[i] = -down[i];
     float side[3] = {1.0f, 0.0f, 0.0f};
-    if (std::fabs(up[0]) > 0.9f) {
+    if (std::fabs(f.up[0]) > 0.9f) {
         side[0] = 0.0f;
         side[2] = 1.0f;
     }
-    float u[3] = {up[1] * side[2] - up[2] * side[1], up[2] * side[0] - up[0] * side[2], up[0] * side[1] - up[1] * side[0]};
+    const float* up = f.up;
+    float* u = f.u;
+    u[0] = up[1] * side[2] - up[2] * side[1];
+    u[1] = up[2] * side[0] - up[0] * side[2];
+    u[2] = up[0] * side[1] - up[1] * side[0];
     const float length = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
-    for (float& x : u) x /= length > 0.0f ? length : 1.0f;
-    const float v[3] = {up[1] * u[2] - up[2] * u[1], up[2] * u[0] - up[0] * u[2], up[0] * u[1] - up[1] * u[0]};
-    const float angle = 2.39996f * static_cast<float>(g_spawned);  // the golden angle: no two land together
-    const float radius = 120.0f + 25.0f * std::sqrt(static_cast<float>(g_spawned));
-    const float height = 300.0f;
-    float where[3];
+    for (int i = 0; i < 3; ++i) u[i] /= length > 0.0f ? length : 1.0f;
+    f.v[0] = up[1] * u[2] - up[2] * u[1];
+    f.v[1] = up[2] * u[0] - up[0] * u[2];
+    f.v[2] = up[0] * u[1] - up[1] * u[0];
+    return true;
+}
+
+// The floor below a spot round the player (an angle and a distance across the planet's up); the spot itself if
+// there's no floor there.
+bool floor_round(const PlayerFrame& f, float angle, float radius, float* out) {
+    float spot[3], from[3], to[3];
     for (int i = 0; i < 3; ++i) {
-        where[i] = at[i] + up[i] * height + (u[i] * std::cos(angle) + v[i] * std::sin(angle)) * radius;
+        spot[i] = f.at[i] + (f.u[i] * std::cos(angle) + f.v[i] * std::sin(angle)) * radius;
+        from[i] = spot[i] + f.up[i] * 300.0f;
+        to[i] = spot[i] - f.up[i] * 600.0f;
     }
+    if (game->raycast != nullptr && game->raycast(from, to, out) != 0) return true;
+    for (int i = 0; i < 3; ++i) out[i] = spot[i];
+    return false;
+}
+
+ActorCall g_base_mtx = nullptr;  // LiveActor's own: its base matrix from its position and rotation
+
+// One enemy of a trap's group, on the ground round the player, each a little further round a ring; then its own
+// placement steps, from the world.
+void spawn_next() {
+    PlayerFrame f;
+    if (!player_frame(f)) return;
     const std::string object = g_spawns.front();
     g_spawns.pop_front();
-    ++g_spawned;
-    if (game->spawn(object.c_str(), where) == nullptr) log("could not drop a " + object + " here");
+    const int n = g_spawned++;
+    static const Steps no_steps;
+    const auto placed = g_pool_place.find(object);
+    const Steps& steps = placed != g_pool_place.end() ? placed->second : no_steps;
+    // Round the player, on the ground: a ring that widens with the group, each one found on the floor below its spot.
+    // "at_player": the first right where the player is, the rest further out by its spacing.
+    const float angle = 2.39996f * static_cast<float>(n);  // the golden angle: no two land together
+    float radius = 250.0f + 60.0f * std::sqrt(static_cast<float>(n));
+    if (const std::vector<std::string>* at_player = find_step(steps, "at_player")) {
+        radius = (at_player->size() >= 2 ? to_float((*at_player)[1], 400.0f) : 400.0f) * std::sqrt(static_cast<float>(n));
+    }
+    float ground[3], where[3];
+    const bool on_ground = floor_round(f, angle, radius, ground);
+    for (int i = 0; i < 3; ++i) where[i] = ground[i] + f.up[i] * 20.0f;
+
+    NebulaActor* enemy = take_from_pool(object);
+    if (enemy == nullptr) {
+        if (g_spawned == 1) {
+            log(g_pool.count(object) != 0
+                    ? "every " + object + " in this stage is defeated, and they can't come back"
+                    : "no " + object + " ready in this stage: switched off in the YAML, or the stage loaded before the client "
+                      "connected");
+        }
+        return;
+    }
+    game->set_position(enemy, where);
+    if (game->set_velocity != nullptr) {
+        const float still[3] = {0.0f, 0.0f, 0.0f};
+        game->set_velocity(enemy, still);  // nothing left over from how it was last defeated
+    }
+    bool reappear = false;
+    for (const std::vector<std::string>& step : steps) {
+        if (step.empty()) continue;
+        char* base = reinterpret_cast<char*>(enemy);
+        const long at = step.size() >= 2 ? field_offset(step[1]) : -1;
+        if (step[0] == "upright") {
+            // Stood up to the planet here: the rotation that turns its up to the planet's (as its base matrix reads it).
+            const float to_degrees = 57.2957795f;
+            const float rotation[3] = {std::asin(std::clamp(f.up[2], -1.0f, 1.0f)) * to_degrees, 0.0f,
+                                       std::atan2(-f.up[0], f.up[1]) * to_degrees};
+            if (game->set_rotation != nullptr) game->set_rotation(enemy, rotation);
+            if (g_base_mtx != nullptr) g_base_mtx(enemy);
+        } else if (step[0] == "ground" && at >= 0) {
+            std::memcpy(base + at, ground, sizeof(ground));  // the floor it's to come down on
+        } else if (step[0] == "f32" && at >= 0 && step.size() >= 3) {
+            const float value = to_float(step[2], 0.0f);
+            std::memcpy(base + at, &value, sizeof(value));
+        } else if (step[0] == "i32" && at >= 0 && step.size() >= 3) {
+            const int32_t value = to_int(step[2]);
+            std::memcpy(base + at, &value, sizeof(value));
+        } else if (step[0] == "reappear") {
+            reappear = true;  // its appear() sets it going from where it now is, even when it's already out
+        }
+    }
+    // Turned upright to the planet where it now stands, as a placed one is after placement.
+    using AfterPlacement = void (*)(NebulaActor*);
+    const auto cls = g_pool_class.find(object);
+    const std::string after = "?initAfterPlacement@" + (cls != g_pool_class.end() ? cls->second : object) + "@@UEAAXXZ";
+    if (auto setup = reinterpret_cast<AfterPlacement>(game->find_function(after.c_str()))) setup(enemy);
+    // One reused while out is already there: it just moves (unless its steps say to start it over).
+    if (reappear || game->is_dead(enemy) != 0) game->appear(enemy);
+    const std::string before = visibility(enemy);
+    if (g_invalidate_clipping != nullptr) g_invalidate_clipping(enemy);
+    if (g_is_hidden_model != nullptr && g_show_model != nullptr && g_is_hidden_model(enemy)) g_show_model(enemy);
+    if (g_spawned == 1) {
+        g_spawn_check = enemy;
+        g_spawn_check_object = object;
+        g_spawn_check_frame = g_stage_frames + 60;
+        log("dropping " + object + (on_ground ? " on the ground" : " (no ground found)") + " round the player" + before);
+    }
+}
+
+// "no_rail": a trap enemy made with no placement has no rail; sent to its rail's start (as a Magikoopa is each time it
+// appears), it stays where it is.
+ActorTest g_is_exist_rail = nullptr;
+void (*orig_rail_start)(NebulaActor*) = nullptr;
+void hook_rail_start(NebulaActor* actor) {
+    if (g_no_rail.count(actor) != 0 && !g_is_exist_rail(actor)) return;
+    orig_rail_start(actor);
+}
+
+// "warp": one that moves along its rail while hidden (a Magikoopa between its spells) has none, so as it hides it's
+// moved to somewhere else round the player, between its nearest and furthest, where it appears again.
+void (*orig_hide_model_calc_anim)(NebulaActor*) = nullptr;
+void hook_hide_model_calc_anim(NebulaActor* actor) {
+    orig_hide_model_calc_anim(actor);
+    const auto it = g_warp.find(actor);
+    if (it == g_warp.end() || g_is_exist_rail(actor)) return;
+    PlayerFrame f;
+    if (!player_frame(f)) return;
+    ++g_warps;
+    const float angle = 2.39996f * static_cast<float>(g_warps) + static_cast<float>(g_frame % 628) * 0.01f;
+    const float mix = static_cast<float>((g_frame * 7919 + g_warps * 104729) % 1000) / 1000.0f;
+    const float radius = it->second.first + (it->second.second - it->second.first) * mix;
+    float ground[3], where[3];
+    floor_round(f, angle, radius, ground);
+    for (int i = 0; i < 3; ++i) where[i] = ground[i] + f.up[i] * 20.0f;
+    game->set_position(actor, where);
+}
+
+void forget_trap_actors() {
+    g_no_rail.clear();
+    g_warp.clear();
+}
+
+// A second after a group starts: where its first one is, for the log.
+void check_spawn() {
+    if (g_spawn_check == nullptr || g_stage_frames < g_spawn_check_frame) return;
+    NebulaActor* enemy = g_spawn_check;
+    g_spawn_check = nullptr;
+    float at[3];
+    game->get_position(enemy, at);
+    log(g_spawn_check_object + " after a second: " + (game->is_dead(enemy) != 0 ? "gone" : "here") + ", " +
+        std::to_string(static_cast<int>(game->distance_to_player(enemy))) + " from the player" + visibility(enemy));
 }
 
 // Gives a received power-up once the stage can take it, and the carried one back after a level change.
@@ -929,6 +1410,7 @@ int32_t on_stage_frame(const NebulaModEventData* data, void*) {
     ++g_stage_frames;
     if (!config()) return data->value;
     keep_power_up();
+    check_spawn();
     if (!g_spawns.empty() && game->player() != nullptr && !game->is_cutscene_playing() && --g_spawn_wait <= 0) {
         g_spawn_wait = 4;
         spawn_next();
@@ -947,9 +1429,10 @@ int32_t on_stage_frame(const NebulaModEventData* data, void*) {
     }
     if (!g_pending.empty() && game->player() != nullptr && !game->is_cutscene_playing()) {
         const Pending p = g_pending.front();
-        g_pending.pop_front();
-        if (p.index > g_given) {
-            apply_item(p);
+        if (p.index <= g_given) {
+            g_pending.pop_front();
+        } else if (apply_item(p)) {
+            g_pending.pop_front();
             g_given = p.index;
             game->store_set(me, "given", g_given);
         }
@@ -957,7 +1440,9 @@ int32_t on_stage_frame(const NebulaModEventData* data, void*) {
     if (g_message_frames > 0) {
         if (--g_message_frames == 0) game->hide_message();
     } else if (!g_messages.empty()) {
-        game->show_message(g_messages.front().c_str(), 0);
+        // show_message shows a message by its id: the text is made the mod's own message first.
+        if (game->add_text != nullptr) game->add_text("ArchipelagoMessage", g_messages.front().c_str());
+        game->show_message("ArchipelagoMessage", 0);
         g_messages.pop_front();
         g_message_frames = 180;
     }
@@ -984,6 +1469,12 @@ void think_about_skipping() {
     g_skip_press_next = true;
 }
 
+std::string where_the_player_is() {
+    if (g_stage_frames <= 0 || g_stage_ending || g_stage_name.empty()) return "in the menus";
+    if (g_stage_name == "FileSelect") return "at the file select";
+    return "in " + g_stage_name;
+}
+
 int32_t on_frame(const NebulaModEventData* data, void*) {
     ++g_menu_frames;
     pump();
@@ -1003,6 +1494,7 @@ NEBULA_PLUGIN_ENTRY(api, self) {
         return;
     }
     if (const char* port = game->option(me, "port")) g_port = to_int(port, 43770);
+    if (const char* status = game->option(me, "status")) g_status_messages = std::strcmp(status, "off") != 0;
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) log("no network: WSAStartup failed");
@@ -1020,6 +1512,55 @@ NEBULA_PLUGIN_ENTRY(api, self) {
     install(holder_is_on, &hook_holder_is_on, &orig_holder_is_on, "GameDataHolder::isOnGameEventFlag");
     install(function_is_on, &hook_function_is_on, &orig_function_is_on, "GameDataFunction::isOnGameEventFlag");
     install(galaxy_open, &hook_galaxy_open, &orig_galaxy_open, "MR::isOnGameEventFlagGalaxyOpen");
+    static const char* const checker_can_on[] = {"?canOn@GameEventFlagChecker@@QEBA_NPEBD@Z", nullptr};
+    static const char* const holder_can_on[] = {"?canOnGameEventFlag@GameDataHolder@@QEBA_NPEBD@Z", nullptr};
+    static const char* const function_can_on[] = {"?canOnGameEventFlag@GameDataFunction@@YA_NPEBD@Z", nullptr};
+    static const char* const dome_of[] = {"?getIncludedGrandGalaxyId@GameDataConst@@YAIPEBD@Z", nullptr};
+    static const char* const picture_book_appear[] = {"?appear@ProloguePictureBook@@UEAAXXZ", nullptr};
+    static const char* const letter_appear[] = {"?appear@PrologueLetter@@UEAAXXZ", nullptr};
+    install(checker_can_on, &hook_checker_can_on, &orig_checker_can_on, "GameEventFlagChecker::canOn");
+    install(holder_can_on, &hook_holder_can_on, &orig_holder_can_on, "GameDataHolder::canOnGameEventFlag");
+    install(function_can_on, &hook_function_can_on, &orig_function_can_on, "GameDataFunction::canOnGameEventFlag");
+    install(dome_of, &hook_dome_of, &orig_dome_of, "GameDataConst::getIncludedGrandGalaxyId");
+    g_invalidate_clipping = reinterpret_cast<ActorCall>(game->find_function("?invalidateClipping@MR@@YAXPEAVLiveActor@@@Z"));
+    g_get_creator = reinterpret_cast<void* (*(*)(const char*))(const char*)>(
+        game->find_function("?getCreator@NameObjFactory@@YAP6APEAVNameObj@@PEBD@Z0@Z"));
+    g_mount_archives = reinterpret_cast<void (*)(const char*, const void*)>(
+        game->find_function("?requestMountObjectArchives@NameObjFactory@@YAXPEBDAEBVTableIter@@@Z"));
+    g_init_without_iter = reinterpret_cast<void (*)(void*)>(game->find_function("?initWithoutIter@NameObj@@QEAAXXZ"));
+    g_make_dead = reinterpret_cast<void (*)(void*)>(game->find_function("?makeActorDead@LiveActor@@UEAAXXZ"));
+    g_set_zone = reinterpret_cast<void (*)(int)>(game->find_function("?setCurrentPlacementZoneId@MR@@YAXH@Z"));
+    g_clear_zone = reinterpret_cast<void (*)()>(game->find_function("?clearCurrentPlacementZoneId@MR@@YAXXZ"));
+    static const char* const allocate_draw_lists[] = {"?allocateDrawBufferActorList@SceneFunction@@SAXXZ", nullptr};
+    if (g_get_creator != nullptr && g_init_without_iter != nullptr && g_make_dead != nullptr) {
+        install(allocate_draw_lists, &hook_allocate_draw_lists, &orig_allocate_draw_lists, "SceneFunction::allocateDrawBufferActorList");
+    } else {
+        log("enemy traps need functions this game doesn't have: they do nothing");
+    }
+    g_base_mtx = reinterpret_cast<ActorCall>(game->find_function("?calcAndSetBaseMtx@LiveActor@@UEAAXXZ"));
+    g_is_exist_rail = reinterpret_cast<ActorTest>(game->find_function("?isExistRail@MR@@YA_NPEBVLiveActor@@@Z"));
+    if (g_is_exist_rail != nullptr) {
+        static const char* const rail_start[] = {"?moveCoordAndTransToRailStartPoint@MR@@YAXPEAVLiveActor@@@Z", nullptr};
+        static const char* const hide_calc_anim[] = {"?hideModelAndOnCalcAnim@MR@@YAXPEAVLiveActor@@@Z", nullptr};
+        install(rail_start, &hook_rail_start, &orig_rail_start, "MR::moveCoordAndTransToRailStartPoint");
+        install(hide_calc_anim, &hook_hide_model_calc_anim, &orig_hide_model_calc_anim, "MR::hideModelAndOnCalcAnim");
+    }
+    g_change_item_status = reinterpret_cast<void (*)(int)>(game->find_function("?changeItemStatus@MarioAccess@@YAXH@Z"));
+    g_can_change_state = reinterpret_cast<bool (*)(NebulaActor*)>(
+        game->find_function("?isEnableNerveChange@MarioActor@@QEBA_NXZ"));
+    g_is_clipped = reinterpret_cast<ActorTest>(game->find_function("?isClipped@MR@@YA_NPEBVLiveActor@@@Z"));
+    g_is_hidden_model = reinterpret_cast<ActorTest>(game->find_function("?isHiddenModel@MR@@YA_NPEBVLiveActor@@@Z"));
+    g_show_model = reinterpret_cast<ActorCall>(game->find_function("?showModel@MR@@YAXPEAVLiveActor@@@Z"));
+    static const char* const swing_permission[] = {"?setPlayerSwingPermission@MR@@YAX_N@Z", nullptr};
+    install(swing_permission, &hook_swing_permission, &orig_swing_permission, "MR::setPlayerSwingPermission");
+    picture_book_kill = reinterpret_cast<void (*)(void*)>(game->find_function("?kill@ProloguePictureBook@@UEAAXXZ"));
+    letter_kill = reinterpret_cast<void (*)(void*)>(game->find_function("?kill@PrologueLetter@@UEAAXXZ"));
+    if (picture_book_kill != nullptr) {
+        install(picture_book_appear, &hook_picture_book_appear, &orig_picture_book_appear, "ProloguePictureBook::appear");
+    }
+    if (letter_kill != nullptr) {
+        install(letter_appear, &hook_letter_appear, &orig_letter_appear, "PrologueLetter::appear");
+    }
     install(view_complete, &hook_view_complete, &orig_view_complete, "UserFile::isViewCompleteEnding");
     install(appear_luigi, &hook_appear_luigi, &orig_appear_luigi, "FileSelector::isUserFileAppearLuigi");
     file_is_luigi = reinterpret_cast<bool (*)(const void*, int)>(game->find_function("?isUserFileLuigi@FileSelector@@QEBA_NH@Z"));

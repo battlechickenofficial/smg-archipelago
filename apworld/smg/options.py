@@ -5,7 +5,7 @@ from schema import And, Optional, Schema
 from Options import (Choice, DeathLink, DefaultOnToggle, OptionDict, OptionGroup, OptionSet, PerGameCommonOptions,
                      Range, Toggle)
 
-from .data import ENEMIES, ENEMY_GROUP_MAX, POWER_UPS
+from .data import ENEMIES, ENEMY_GROUP_MAX, POWER_UP_ITEM_NAMES
 
 
 class GalaxyUnlocks(DefaultOnToggle):
@@ -124,8 +124,9 @@ class EnemyTrapGroups(OptionDict):
     """Each enemy that can be an enemy trap: whether it is one, and the fewest and most in its group. The number in
     each group is picked between min and max when the trap arrives. Enemies left out keep their defaults.
 
-    Enemies: Goomba, Dry Bones, Boo, Bob-omb, Octoomba, Spiky Topman, Spring Topman, Topmini, Li'l Cinder,
-    Magikoopa, Monty Mole, Urchin, Cluckboom, Thwomp, Blooper, Jellyfish.
+    Enemies: Goomba, Dry Bones, Boo, Bob-omb, Octoomba, Spiky Topman, Spring Topman, Topmini, Monty Mole, Urchin,
+    Cluckboom, Thwomp, Blooper, Jellyfish. (Li'l Cinder and Magikoopa are accepted but never used: the game can't
+    make them outside their own levels.)
 
     For example:
       Goomba: {enabled: true, min: 3, max: 20}
@@ -150,11 +151,40 @@ class EnemyTrapGroups(OptionDict):
         return merged
 
 
+class EnemyTrapStock(Range):
+    """How many of each enemy every stage keeps ready for traps, as a multiple of its largest group. The game can only
+    take on new enemies while a stage loads. Defeated ones come back for later traps (Goombas, Bob-ombs, Boos,
+    Topmen, Urchins, Magikoopas and Thwomps; the others can't be revived), and when every one is out, a trap moves the
+    ones out longest, so traps don't run dry; this only sets how many can be out at once."""
+    display_name = "Enemy Trap Stock"
+    range_start = 1
+    range_end = 10
+    default = 2
+
+
+class ThwompDropHeight(Range):
+    """How far above the player a Thwomp Trap's Thwomp appears before it slams down."""
+    display_name = "Thwomp Drop Height"
+    range_start = 200
+    range_end = 3000
+    default = 600
+
+
+class ThwompDropDelay(Range):
+    """How long a Thwomp Trap's Thwomp hangs above the player before it shakes and falls, in frames (60 a second).
+    It shakes for a moment before falling either way. Also how long it waits up top between slams."""
+    display_name = "Thwomp Drop Delay"
+    range_start = 0
+    range_end = 300
+    default = 30
+
+
 class PowerUpItems(OptionSet):
-    """Power-ups that can be filler items. Leave empty for none."""
+    """Power-ups that can be filler items. Leave empty for none. The Life Mushroom gives its extra health (to 6), as
+    if picked up; once it's had, another refills it."""
     display_name = "Power-Up Items"
-    valid_keys = sorted(POWER_UPS)
-    default = frozenset(POWER_UPS)
+    valid_keys = sorted(POWER_UP_ITEM_NAMES)
+    default = frozenset(POWER_UP_ITEM_NAMES)
 
 
 class PowerUpItemWeight(Range):
@@ -183,10 +213,16 @@ class UntimedPowerUps(Toggle):
     display_name = "Untimed Power-Ups"
 
 
+class SpinFromStart(DefaultOnToggle):
+    """Mario (and Luigi) can spin from the very start, rather than once the Luma gives it in the Gateway."""
+    display_name = "Spin From Start"
+
+
 class SkipCutscenes(Toggle):
-    """Skip cutscenes: the movies, a galaxy's opening camera tour, Rosalina's story scenes and storybook, stars
-    returning to the Observatory, the lessons and the bosses' scenes (what Nebula's own + skip skips), as if you
-    pressed + and chose Yes. The ending after the final fight is never skipped."""
+    """Skip cutscenes: the opening story time (picture book and Peach's letter), the movies, a galaxy's opening
+    camera tour, Rosalina's story scenes and storybook, stars returning to the Observatory, the lessons and the
+    bosses' scenes (what Nebula's own + skip skips), as if you pressed + and chose Yes. The ending after the final
+    fight is never skipped."""
     display_name = "Skip Cutscenes"
 
 
@@ -213,11 +249,15 @@ class SMGOptions(PerGameCommonOptions):
     star_bit_drain_trap: StarBitDrainTrap
     enemy_traps: EnemyTraps
     enemy_trap_groups: EnemyTrapGroups
+    enemy_trap_stock: EnemyTrapStock
+    thwomp_drop_height: ThwompDropHeight
+    thwomp_drop_delay: ThwompDropDelay
     power_up_items: PowerUpItems
     power_up_item_weight: PowerUpItemWeight
     persistent_power_ups: PersistentPowerUps
     untimed_power_ups: UntimedPowerUps
     skip_cutscenes: SkipCutscenes
+    spin_from_start: SpinFromStart
     item_messages: ItemMessages
     death_link: DeathLink
 
@@ -227,7 +267,7 @@ option_groups = [
     OptionGroup("Luigi", [LuigiUnlock, LuigiStars]),
     OptionGroup("Star Shuffle", [StarShuffle, ShuffleComets, ShuffleGrandStars, PurpleCoinComets]),
     OptionGroup("Traps", [TrapPercentage, DamageTrap, PowerUpLossTrap, StarBitDrainTrap, EnemyTraps,
-                          EnemyTrapGroups]),
+                          EnemyTrapGroups, EnemyTrapStock]),
     OptionGroup("Power-Ups", [PowerUpItems, PowerUpItemWeight, PersistentPowerUps, UntimedPowerUps]),
-    OptionGroup("Other", [SkipCutscenes, ItemMessages]),
+    OptionGroup("Other", [SkipCutscenes, SpinFromStart, ItemMessages]),
 ]

@@ -198,7 +198,8 @@ class SMGWorld(World):
         traps = [name for name in sorted(TRAPS) if getattr(self.options, TRAP_OPTIONS[name])]
         if self.options.enemy_traps:
             groups = self.options.enemy_trap_groups.groups()
-            traps += [name for name in sorted(ENEMY_TRAPS) if groups[ENEMY_TRAP_TO_ENEMY[name]]["enabled"]]
+            traps += [name for name in sorted(ENEMY_TRAPS) if groups[ENEMY_TRAP_TO_ENEMY[name]]["enabled"]
+                      and data.ENEMY_BY_NAME[ENEMY_TRAP_TO_ENEMY[name]].works]
         return traps
 
     def get_filler_item_name(self) -> str:
@@ -311,18 +312,51 @@ class SMGWorld(World):
             "item_actions": {str(info.code): list(info.action) for info in item_table.values()
                              if info.code is not None},
             "enemy_groups": self._enemy_groups(),
+            "enemy_pool": self._enemy_pool(),
             "power_ups": self._power_up_rules(),
+            "texts": self._star_select_texts(),
+            "spin_from_start": bool(self.options.spin_from_start),
             "skip_cutscenes": {
                 "enabled": bool(self.options.skip_cutscenes),
+                "prologue": bool(self.options.skip_cutscenes),
                 "never_movies": list(data.ENDING_MOVIES),
                 "never_stages": list(data.ENDING_STAGES),
             },
         }
 
+    def _star_select_texts(self) -> Dict[str, str]:
+        """The star select's name for each shuffled entry: the mission it really plays (the game's ScenarioName_ ids)."""
+        texts: Dict[str, str] = {}
+        for entry, played in self.entry_plays.items():
+            if entry == played:
+                continue
+            galaxy = GALAXY_BY_INTERNAL[played[0]]
+            short = galaxy.name.replace(" Galaxy", "")
+            texts[f"ScenarioName_{entry[0]}{entry[1]}"] = f"{data.star(*played).name} ({short})"
+        return texts
+
     def _enemy_groups(self) -> Dict[str, List[int]]:
         """The fewest and most of each enemy trap, by the game's object name."""
         groups = self.options.enemy_trap_groups.groups()
         return {data.ENEMY_BY_NAME[name].internal: [g["min"], g["max"]] for name, g in groups.items()}
+
+    def _enemy_pool(self) -> Dict[str, List[Any]]:
+        """The enemies each stage keeps hidden, ready for traps: every enemy trap that's on (a trap can be sent with
+        !send too, so not only when traps are filler), as many as its largest group. The game can only take on new
+        enemies while a stage loads."""
+        if not self.options.enemy_traps:
+            return {}
+        groups = self.options.enemy_trap_groups.groups()
+        stock = int(self.options.enemy_trap_stock)
+        pool: Dict[str, List[Any]] = {}
+        for name, g in groups.items():
+            enemy = data.ENEMY_BY_NAME[name]
+            if g["enabled"] and enemy.works:
+                values = {"drop_height": int(self.options.thwomp_drop_height),
+                          "drop_wait": int(self.options.thwomp_drop_delay)}
+                pool[enemy.internal] = [min(g["max"] * stock, data.ENEMY_GROUP_MAX * 4), enemy.cls or enemy.internal,
+                                        enemy.reset, [step.format(**values) for step in enemy.place]]
+        return pool
 
     def _power_up_rules(self) -> Dict[str, Any]:
         persist = self.options.persistent_power_ups

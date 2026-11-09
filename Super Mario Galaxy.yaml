@@ -1,0 +1,68 @@
+# Your Super Mario Galaxy player settings for Archipelago.
+# Change anything below, then give this file to whoever generates the multiworld
+# (or put it in D:\Archipelago\Players to generate one yourself).
+
+name: BattleChicken          # your slot name: what you type in the client to connect. Must be unique in the room.
+game: Super Mario Galaxy
+
+Super Mario Galaxy:
+  # ---- Progression
+  galaxy_unlocks: true        # galaxies open only from unlock items, never from your own star count
+  starting_galaxy: good_egg   # good_egg, or random_terrace
+  stars_for_bowser: 60        # stars needed (besides its item) to open Bowser's Galaxy Reactor, 0-100
+  unlock_all_on_goal: true    # beating Bowser unlocks every galaxy and Luigi
+
+  # ---- Luigi
+  luigi_unlock: item          # item: Luigi needs the Luigi item. vanilla: after the full ending, as normal
+  luigi_stars: false          # true: Luigi's own 120 stars are locations too
+
+  # ---- Star Shuffle
+  star_shuffle: "off"          # off, within_galaxy, or all_missions
+  shuffle_comets: true        # comet missions join the shuffle
+  shuffle_grand_stars: false  # Bowser / Bowser Jr. fights join the shuffle
+  purple_coin_comets: early   # early, vanilla (post-game, excluded), or off (not locations)
+
+  # ---- Traps
+  trap_percentage: 10         # percent of filler that is traps, 0-100
+  damage_trap: true
+  power_up_loss_trap: true
+  star_bit_drain_trap: true
+  enemy_traps: true
+  enemy_trap_groups:          # per enemy: on/off and the fewest and most in a group (1-50)
+    Goomba: {enabled: true, min: 3, max: 20}
+    Dry Bones: {enabled: true, min: 2, max: 5}
+    Boo: {enabled: true, min: 2, max: 6}
+    Bob-omb: {enabled: true, min: 2, max: 6}
+    Octoomba: {enabled: true, min: 2, max: 5}
+    Spiky Topman: {enabled: true, min: 2, max: 5}
+    Spring Topman: {enabled: true, min: 2, max: 5}
+    Topmini: {enabled: true, min: 3, max: 8}
+    Li'l Cinder: {enabled: true, min: 2, max: 5}
+    Magikoopa: {enabled: true, min: 1, max: 2}
+    Monty Mole: {enabled: true, min: 1, max: 3}
+    Urchin: {enabled: true, min: 2, max: 4}
+    Cluckboom: {enabled: true, min: 1, max: 2}
+    Thwomp: {enabled: true, min: 1, max: 1}
+    Blooper: {enabled: true, min: 2, max: 4}
+    Jellyfish: {enabled: true, min: 2, max: 4}
+  thwomp_drop_height: 600     # how far above you a Thwomp appears before slamming down, 200-3000
+  thwomp_drop_delay: 30       # frames it hangs there first (60 a second), 0-300
+
+  # ---- Power-ups
+  power_up_items:             # which power-ups can be filler; [] for none
+    - Fire Flower
+    - Ice Flower
+    - Bee Mushroom
+    - Spring Mushroom
+    - Boo Mushroom
+    - Red Star
+    - Rainbow Star
+    - Life Mushroom           # extra health (to 6), as if picked up
+  power_up_item_weight: 7     # how often filler is a power-up (the other filler weighs 13), 0-50
+  persistent_power_ups: all   # all, items_only, or off
+  untimed_power_ups: false    # true: Fire, Ice and Red Star don't run out (experimental)
+
+  # ---- Other
+  skip_cutscenes: true        # skip movies, story scenes, star returns, boss intros (never the ending)
+  item_messages: true         # in-game messages for items sent and received
+  death_link: false

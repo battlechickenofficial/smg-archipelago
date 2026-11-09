@@ -51,8 +51,10 @@ See [apworld/smg/docs/setup_en.md](apworld/smg/docs/setup_en.md). In short:
 | `star_bit_drain_trap` | on | Lose 30 star bits. |
 | `enemy_traps` | on | Enemy traps: a group of enemies drops on top of you. |
 | `enemy_trap_groups` | see below | Per enemy: whether it can be a trap, and the fewest and most in a group (1–50). |
-| `power_up_items` | all | Power-ups that can be filler: Fire Flower, Ice Flower, Bee, Spring, Boo Mushroom, Red Star, Rainbow Star. |
+| `power_up_items` | all | Power-ups that can be filler: Fire Flower, Ice Flower, Bee, Spring, Boo Mushroom, Red Star, Rainbow Star, Life Mushroom (extra health to 6, as if picked up). |
 | `power_up_item_weight` | 7 | How often filler is a power-up (the other filler weighs 13 in total). |
+| `thwomp_drop_height` | 600 | How far above you a Thwomp Trap's Thwomp appears (200–3000). |
+| `thwomp_drop_delay` | 30 | Frames it hangs there before it shakes and falls (0–300; 60 a second). |
 | `persistent_power_ups` | all | A power-up stays with you from level to level until lost. `items_only`, or `off`. Never the Rainbow Star. |
 | `untimed_power_ups` | off | Experimental: Fire Flower, Ice Flower and Red Star don't run out. The Rainbow Star still does. |
 | `skip_cutscenes` | off | Skip movies, galaxy opening cameras, Rosalina's story scenes and storybook, star returns, lessons and boss scenes. Never the ending after the final fight. |
@@ -76,7 +78,7 @@ Super Mario Galaxy:
 | Enemy | Default |  | Enemy | Default |
 |---|---|---|---|---|
 | Goomba | on, 3–8 | | Li'l Cinder | on, 2–5 |
-| Dry Bones | on, 2–5 | | Magikoopa | on, 1–2 |
+| Dry Bones | on, 2–5 | | Magikoopa | off, 1–2 |
 | Boo | on, 2–6 | | Monty Mole | off, 1–3 |
 | Bob-omb | on, 2–6 | | Urchin | off, 2–4 |
 | Octoomba | on, 2–5 | | Cluckboom | off, 1–2 |
@@ -85,6 +87,9 @@ Super Mario Galaxy:
 | Topmini | on, 3–8 | | Jellyfish | off, 2–4 |
 
 The group size is picked when the item arrives, the same way every time for the same item.
+
+A Thwomp appears `thwomp_drop_height` (600) above you, hangs for `thwomp_drop_delay` frames (30), shakes and slams
+down where you stood. A Magikoopa warps to somewhere else around you each time it vanishes.
 
 ## How it works
 

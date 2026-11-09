@@ -5,13 +5,16 @@ protocol of tab-separated words. The client turns the world's slot data into the
 to it, and turns the stars the mod reports into location checks.
 
   client -> mod                                   mod -> client
+  CLIENT <mod version it is made for>
   SEED <seed>                                     HELLO <version>
   BEGIN                                           STAR <galaxy> <number> <luigi 0/1>
   RULE <flag> <enforce> <min> <items> <flags> <stars>   DEATH
   LUIGIRULE <items>|-                             LOG <text>
+  STATUS <server 0/1> <slot>|-                    PING <where the player is>
   REDIRECT <galaxy> <n> <to galaxy> <to n>
   KEEP <galaxy> <n>
   OPTION <name> <value>
+  TEXT <message id> <text>
   COMMIT
   TOKEN <token>
   CONST <player table name> <value>
@@ -24,6 +27,7 @@ to it, and turns the stars the mod reports into location checks.
 """
 import asyncio
 import random
+import time
 from typing import Any, Dict, List, Optional
 
 import Utils
@@ -33,6 +37,11 @@ from NetUtils import ClientStatus, JSONtoTextParser
 GAME = "Super Mario Galaxy"
 DEFAULT_PORT = 43770
 PROTOCOL_VERSION = "1"
+# The mod this client is made for: the mod says when the client is a different one (an old client, still running after
+# an update, sends what the old mod wanted).
+MOD_VERSION = "0.2.3"
+# The mod says where the player is every couple of seconds; this long without a word, the client says so.
+GAME_QUIET_SECONDS = 10
 
 
 def _clean(text: str) -> str:
@@ -43,7 +52,7 @@ class SMGCommandProcessor(ClientCommandProcessor):
     def _cmd_smg(self) -> None:
         """Say whether the game is connected."""
         if isinstance(self.ctx, SMGContext):
-            logger.info("Game: " + ("connected" if self.ctx.game_writer else "not connected"))
+            logger.info("Game: " + self.ctx.game_status())
 
     def _cmd_resync(self) -> None:
         """Send the game its rules and items again."""
@@ -63,8 +72,13 @@ class SMGContext(CommonContext):
         self.game_writer: Optional[asyncio.StreamWriter] = None
         self.slot_data: Optional[Dict[str, Any]] = None
         self.seed_name_for_game: Optional[str] = None
+        self.room_seed_name: Optional[str] = None  # the server's name for its seed, from RoomInfo
         self.goal_sent = False
         self.text_parser = JSONtoTextParser(self)
+        self.game_version: Optional[str] = None  # the mod's version, once it has said hello
+        self.game_where = ""                     # where the player is, from the mod's last PING
+        self.game_heard = 0.0                    # when the mod last said anything
+        self.game_quiet = False                  # said that it's gone quiet
 
     # ------------------------------------------------------------ server side
     async def server_auth(self, password_requested: bool = False) -> None:
@@ -74,12 +88,18 @@ class SMGContext(CommonContext):
         await self.send_connect()
 
     def on_package(self, cmd: str, args: Dict[str, Any]) -> None:
-        if cmd == "Connected":
+        if cmd == "RoomInfo":
+            # Kept here: Archipelago 0.6.7 and earlier keep no copy of it.
+            self.room_seed_name = args.get("seed_name")
+        elif cmd == "Connected":
             self.slot_data = args.get("slot_data") or {}
-            self.seed_name_for_game = f"{self.seed_name}:{self.slot}"
+            # The server's name for the seed, with the team and slot: a new seed, or another slot, starts the mod's
+            # saved state over.
+            self.seed_name_for_game = f"{self.room_seed_name}:{self.team}:{self.slot}"
             self.goal_sent = False
             Utils.async_start(self.update_death_link(bool(self.slot_data.get("death_link"))))
             self.sync_game()
+            self.send_status()
         elif cmd == "ReceivedItems":
             start = args["index"]
             if start == 0:
@@ -102,6 +122,7 @@ class SMGContext(CommonContext):
     async def disconnect(self, allow_autoreconnect: bool = False) -> None:
         self.slot_data = None
         await super().disconnect(allow_autoreconnect)
+        self.send_status()
 
     # ------------------------------------------------------------ game side
     def game_send(self, *words: Any) -> None:
@@ -112,11 +133,55 @@ class SMGContext(CommonContext):
         except (ConnectionError, OSError):
             self.game_writer = None
 
+    def send_status(self) -> None:
+        """Tell the game whether this client is in a multiworld, and as whom (it says so on screen)."""
+        connected = bool(self.slot_data) and self.slot is not None
+        name = self.player_names.get(self.slot, self.auth or "") if connected else ""
+        self.game_send("STATUS", int(connected), name or "-")
+
+    def game_status(self) -> str:
+        if self.game_writer is None:
+            return f"not connected (start Nebula with the Archipelago mod on; it looks for this client on port {self.port})"
+        status = f"connected (mod {self.game_version or '?'})"
+        if self.game_where:
+            status += f", {self.game_where}"
+        if self.game_quiet:
+            status += f", but no word from it for {int(time.monotonic() - self.game_heard)} seconds"
+        return status
+
+    def show_game_status(self) -> None:
+        """The window's title says whether the game is connected."""
+        if self.ui is None:
+            return
+        state = "game not connected" if self.game_writer is None else (
+            "game not answering" if self.game_quiet else "game connected")
+        try:
+            self.ui.title = f"{self.ui.base_title} - {state}"
+        except Exception:  # another kind of window: the log still says it
+            pass
+
+    async def watch_game(self) -> None:
+        """Says when the game goes quiet (frozen, or closed without a word) and when it's back."""
+        while not self.exit_event.is_set():
+            await asyncio.sleep(2)
+            if self.game_writer is None or self.game_version is None:
+                continue
+            quiet = time.monotonic() - self.game_heard > GAME_QUIET_SECONDS
+            if quiet != self.game_quiet:
+                self.game_quiet = quiet
+                if quiet:
+                    logger.info(f"No word from Super Mario Galaxy for {GAME_QUIET_SECONDS} seconds: it may be frozen, "
+                                "or paused in the background.")
+                else:
+                    logger.info("Super Mario Galaxy is answering again.")
+                self.show_game_status()
+
     def sync_game(self) -> None:
         """Everything the mod needs, from the top: its rules, then every item received so far."""
-        if self.game_writer is None or not self.slot_data:
+        if self.game_writer is None or not self.slot_data or not self.room_seed_name:
             return
         sd = self.slot_data
+        self.game_send("CLIENT", MOD_VERSION)
         self.game_send("SEED", self.seed_name_for_game)
         self.game_send("BEGIN")
         for flag, rule in sd.get("rules", {}).items():
@@ -142,6 +207,14 @@ class SMGContext(CommonContext):
         self.game_send("OPTION", "skip_cutscenes", int(bool(skip.get("enabled"))))
         self.game_send("OPTION", "skip_never_movies", ",".join(skip.get("never_movies", [])) or "-")
         self.game_send("OPTION", "skip_never_stages", ",".join(skip.get("never_stages", [])) or "-")
+        self.game_send("OPTION", "skip_prologue", int(bool(skip.get("prologue"))))
+        self.game_send("OPTION", "spin_from_start", int(bool(sd.get("spin_from_start"))))
+        pool = sd.get("enemy_pool") or {}
+        self.game_send("OPTION", "enemy_pool",
+                       ",".join(f"{name}:{count}:{cls}:{reset}:{'|'.join(place) or '-'}"
+                                for name, (count, cls, reset, place) in pool.items()) or "-")
+        for message_id, text in (sd.get("texts") or {}).items():
+            self.game_send("TEXT", message_id, text)
         self.game_send("COMMIT")
         for index, item in enumerate(self.items_received):
             self.send_item(index, item, announce=False)
@@ -186,9 +259,16 @@ class SMGContext(CommonContext):
     async def on_game_line(self, words: List[str]) -> None:
         if not words:
             return
+        self.game_heard = time.monotonic()
         if words[0] == "HELLO":
-            logger.info(f"Super Mario Galaxy connected (mod {words[1] if len(words) > 1 else '?'}).")
+            self.game_version = words[1] if len(words) > 1 else "?"
+            logger.info(f"Super Mario Galaxy connected (mod {self.game_version})."
+                        + ("" if self.slot_data else " Connect to a server to start."))
             self.sync_game()
+            self.send_status()
+            self.show_game_status()
+        elif words[0] == "PING":
+            self.game_where = words[1] if len(words) > 1 else ""
         elif words[0] == "STAR" and len(words) >= 4 and self.slot_data:
             galaxy, number, luigi = words[1], int(words[2]), words[3] == "1"
             goal = self.slot_data.get("goal")
@@ -217,6 +297,10 @@ class SMGContext(CommonContext):
             except OSError:
                 pass
         self.game_writer = writer
+        self.game_version = None
+        self.game_where = ""
+        self.game_quiet = False
+        self.game_heard = time.monotonic()
         self.game_send("HELLO", PROTOCOL_VERSION)
         try:
             while not reader.at_eof():
@@ -229,12 +313,20 @@ class SMGContext(CommonContext):
         finally:
             if self.game_writer is writer:
                 self.game_writer = None
+                self.game_version = None
+                self.game_where = ""
+                self.game_quiet = False
                 logger.info("Super Mario Galaxy disconnected.")
+                self.show_game_status()
 
     def make_gui(self):
         ui = super().make_gui()
         ui.base_title = "Archipelago Super Mario Galaxy Client"
         return ui
+
+    def run_gui(self) -> None:
+        super().run_gui()
+        self.show_game_status()
 
 
 def launch(*args: str) -> None:
@@ -247,7 +339,9 @@ def launch(*args: str) -> None:
         if gui_enabled:
             ctx.run_gui()
         ctx.run_cli()
+        watcher = asyncio.create_task(ctx.watch_game(), name="game watcher")
         await ctx.exit_event.wait()
+        watcher.cancel()
         game_server.close()
         await ctx.shutdown()
 

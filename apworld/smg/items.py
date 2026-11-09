@@ -3,7 +3,7 @@ from typing import Dict, Optional
 
 from BaseClasses import Item, ItemClassification
 
-from .data import ENEMIES, GALAXIES, ITEM_BASE, POWER_UPS
+from .data import ENEMIES, GALAXIES, ITEM_BASE, LIFE_MUSHROOM, LIFE_MUSHROOM_ITEM_STATUS, POWER_UPS
 
 GAME = "Super Mario Galaxy"
 
@@ -51,6 +51,7 @@ ENEMY_TRAPS = {f"{e.name} Trap": ("trap", "enemies", e.internal) for e in ENEMIE
 ENEMY_TRAP_TO_ENEMY = {f"{e.name} Trap": e.name for e in ENEMIES}
 
 POWER_UP_ITEMS = {name: ("power_up", mode) for name, mode in POWER_UPS.items()}
+POWER_UP_ITEMS[LIFE_MUSHROOM] = ("give", "life_up", LIFE_MUSHROOM_ITEM_STATUS)  # extra health, as if picked up
 
 item_table: Dict[str, ItemInfo] = {}
 for i, g in enumerate(GALAXIES):

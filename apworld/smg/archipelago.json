@@ -1,6 +1,8 @@
 {
   "game": "Super Mario Galaxy",
   "minimum_ap_version": "0.6.4",
-  "world_version": "0.1.0",
-  "authors": ["SMG Archipelago"]
+  "world_version": "0.2.3",
+  "authors": [
+    "SMG Archipelago"
+  ]
 }

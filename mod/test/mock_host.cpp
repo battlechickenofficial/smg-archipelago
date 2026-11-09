@@ -16,6 +16,10 @@
 //   reset                      a new stage's load resets the power-up
 //   cutscene <0|1>             a cutscene plays (one Nebula's + skip can skip)
 //   movie <path>|off           a movie starts (through MR::startMoviePlayer) or ends
+//   canopen <galaxy>           what GameDataFunction::canOnGameEventFlag answers (the game's own: yes)
+//   dome <galaxy>              what GameDataConst::getIncludedGrandGalaxyId answers
+//   prologue                   the new file's story time opens its picture book, then Peach's letter
+//   swing <0|1>                the game sets the spin's permission (MR::setPlayerSwingPermission)
 //   quit
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -125,6 +129,64 @@ void d_skip_update() {
 }
 bool d_is_skipping() { return skip_state == Skip_Skipping; }
 
+bool d_can_on(const char*) { return true; }  // vanilla: enough stars, so it could open
+uint32_t d_dome_of(const char* galaxy) {     // a stand-in table: each galaxy its own dome
+    uint32_t h = 0;
+    for (const char* at = galaxy; *at != '\0'; ++at) h = h * 31u + static_cast<unsigned char>(*at);
+    return 1u + h % 6u;
+}
+bool picture_book_open = false;
+bool letter_open = false;
+void d_picture_book_appear(void*) { picture_book_open = true; }
+void d_picture_book_kill(void*) { picture_book_open = false; }
+void d_letter_appear(void*) { letter_open = true; }
+void d_letter_kill(void*) { letter_open = false; }
+void d_swing_permission(bool permission) { std::printf("MOCK swing %d\n", permission ? 1 : 0); }
+// A spawned enemy starts clipped (as one made in play can be in the game) until clipping is taken off it.
+bool spawned_clipped = true;
+void d_invalidate_clipping(void*) { spawned_clipped = false; }
+bool d_is_clipped(const void*) { return spawned_clipped; }
+bool d_is_hidden_model(const void*) { return false; }
+void d_show_model(void*) {}
+// Objects the "game" makes by name: each a record of its name, whether it is dead and where it is.
+struct MockObj {
+    std::string name;
+    bool dead = false;
+    bool inited = false;
+    float at[3] = {0, 0, 0};
+    unsigned char raw[0x200] = {};  // room for fields a placement step writes (a Thwomp's, at 0xEC to 0x108)
+};
+std::vector<MockObj*> objects;
+bool loading = false;  // objects may only be made while a stage loads
+MockObj* make_obj(const char* name) {
+    if (!loading) std::printf("MOCK object made outside a stage load: %s\n", name);
+    MockObj* o = new MockObj();
+    o->name = name;
+    objects.push_back(o);
+    return o;
+}
+void* d_create_kuribo(const char* name) { return make_obj(name); }
+using Creator = void* (*)(const char*);
+Creator d_get_creator(const char* name) {
+    const std::string n = name;
+    return n == "Kuribo" || n == "Karon" || n == "Teresa" || n == "Dossun" || n == "FireBallBeamKameck" ? &d_create_kuribo : nullptr;
+}
+void d_mount_archives(const char*, const void*) {}
+void d_init_without_iter(void* o) { static_cast<MockObj*>(o)->inited = true; }
+void d_make_dead(void* o) { static_cast<MockObj*>(o)->dead = true; }
+int placement_zone = -1;
+void d_set_zone(int zone) { placement_zone = zone; }
+void d_clear_zone() { placement_zone = -1; }
+void d_kuribo_start_state(void* o, const void*) { std::printf("MOCK %s back to its start\n", static_cast<MockObj*>(o)->name.c_str()); }
+void d_base_mtx(void* o) { std::printf("MOCK base matrix %s\n", static_cast<MockObj*>(o)->name.c_str()); }
+bool d_is_exist_rail(void*) { return false; }
+void d_rail_start(void* o) { std::printf("MOCK rail start %s (crashes: no rail)\n", static_cast<MockObj*>(o)->name.c_str()); }
+void d_hide_calc_anim(void* o) { std::printf("MOCK hidden %s\n", static_cast<MockObj*>(o)->name.c_str()); }
+void d_change_item_status(int status) { std::printf("MOCK item status %d\n", status); }
+bool player_busy = false;
+bool d_can_change_state(void*) { return !player_busy; }
+void d_allocate_draw_lists() { std::printf("MOCK draw lists sized: %zu objects\n", objects.size()); }
+
 void save_store() {
     std::ofstream out(store_path, std::ios::trunc | std::ios::binary);
     for (auto& [k, v] : number_store) out << "N\t" << k << "\t" << v << "\n";
@@ -217,7 +279,7 @@ NebulaActor* m_spawn(const char* name, const float* at) {
     std::printf("CALL spawn %s %.0f %.0f %.0f\n", name, at[0], at[1], at[2]);
     return kPlayer;
 }
-void m_get_position(NebulaActor*, float* xyz) { xyz[0] = 100.0f; xyz[1] = 0.0f; xyz[2] = 0.0f; }
+void m_get_position(NebulaActor* actor, float* xyz);
 void m_get_gravity(NebulaActor*, float* xyz) { xyz[0] = 0.0f; xyz[1] = -1.0f; xyz[2] = 0.0f; }
 int32_t m_set_constant(int32_t character, const char* name, int32_t, float value) {
     std::printf("CALL set_player_constant %d %s %.0f\n", character, name, value);
@@ -258,6 +320,49 @@ int32_t m_store_get_text(const NebulaPlugin*, const char* key, char* out, int32_
 }
 void m_store_set_text(const NebulaPlugin*, const char* key, const char* text) { text_store[key] = text; save_store(); }
 int32_t m_cutscene() { return in_stage ? cutscene : 0; }
+// The ground is the plane y = 0.
+int32_t m_raycast(const float* from, const float* to, float* hit) {
+    if ((from[1] > 0.0f) == (to[1] > 0.0f)) return 0;
+    const float t = from[1] / (from[1] - to[1]);
+    for (int i = 0; i < 3; ++i) hit[i] = from[i] + (to[i] - from[i]) * t;
+    return 1;
+}
+MockObj* obj_of(NebulaActor* actor) {
+    for (MockObj* o : objects) {
+        if (reinterpret_cast<NebulaActor*>(o) == actor) return o;
+    }
+    return nullptr;
+}
+int32_t m_is_dead(NebulaActor* actor) {
+    MockObj* o = obj_of(actor);
+    return o != nullptr && o->dead ? 1 : 0;
+}
+void m_appear(NebulaActor* actor) {
+    if (MockObj* o = obj_of(actor)) {
+        o->dead = false;
+        std::printf("CALL appear %s %.0f %.0f %.0f\n", o->name.c_str(), o->at[0], o->at[1], o->at[2]);
+    }
+}
+void m_set_position(NebulaActor* actor, const float* xyz) {
+    if (MockObj* o = obj_of(actor)) {
+        std::printf("CALL move %s\n", o->name.c_str());
+        for (int i = 0; i < 3; ++i) o->at[i] = xyz[i];
+    }
+}
+float m_distance_to_player(NebulaActor*) { return 300.0f; }
+void m_get_position(NebulaActor* actor, float* xyz) {
+    if (MockObj* o = obj_of(actor)) {
+        for (int i = 0; i < 3; ++i) xyz[i] = o->at[i];
+        return;
+    }
+    xyz[0] = 100.0f;
+    xyz[1] = 0.0f;
+    xyz[2] = 0.0f;
+}
+int32_t m_add_text(const char* id, const char* text) {
+    std::printf("CALL add_text %s %s\n", id, text);
+    return 0;
+}
 const char* d_stage_name() { return stage.c_str(); }
 
 }  // namespace
@@ -305,6 +410,12 @@ int main(int argc, char** argv) {
     api.get_gravity = m_get_gravity;
     api.set_player_constant = m_set_constant;
     api.player_constant = m_constant;
+    api.add_text = m_add_text;
+    api.raycast = m_raycast;
+    api.is_dead = m_is_dead;
+    api.appear = m_appear;
+    api.distance_to_player = m_distance_to_player;
+    api.set_position = m_set_position;
     const auto add = [](const char* symbol, void* fn) { slots.push_back({symbol, fn, fn}); };
     add("?update@NebulaCutsceneSkip@@YAXXZ", reinterpret_cast<void*>(&d_skip_update));
     add("?isSkipping@NebulaCutsceneSkip@@YA_NXZ", reinterpret_cast<void*>(&d_is_skipping));
@@ -316,6 +427,31 @@ int main(int argc, char** argv) {
     add("?isActiveMoviePlayer@MR@@YA_NXZ", reinterpret_cast<void*>(&d_is_active_movie));
     add("?isExecScenarioOpeningCamera@GameSceneFunction@@YA_NXZ", reinterpret_cast<void*>(&d_opening_camera));
     add("?getCurrentStageName@MR@@YAPEBDXZ", reinterpret_cast<void*>(&d_stage_name));
+    add("?canOnGameEventFlag@GameDataFunction@@YA_NPEBD@Z", reinterpret_cast<void*>(&d_can_on));
+    add("?getIncludedGrandGalaxyId@GameDataConst@@YAIPEBD@Z", reinterpret_cast<void*>(&d_dome_of));
+    add("?appear@ProloguePictureBook@@UEAAXXZ", reinterpret_cast<void*>(&d_picture_book_appear));
+    add("?kill@ProloguePictureBook@@UEAAXXZ", reinterpret_cast<void*>(&d_picture_book_kill));
+    add("?appear@PrologueLetter@@UEAAXXZ", reinterpret_cast<void*>(&d_letter_appear));
+    add("?kill@PrologueLetter@@UEAAXXZ", reinterpret_cast<void*>(&d_letter_kill));
+    add("?setPlayerSwingPermission@MR@@YAX_N@Z", reinterpret_cast<void*>(&d_swing_permission));
+    add("?invalidateClipping@MR@@YAXPEAVLiveActor@@@Z", reinterpret_cast<void*>(&d_invalidate_clipping));
+    add("?isClipped@MR@@YA_NPEBVLiveActor@@@Z", reinterpret_cast<void*>(&d_is_clipped));
+    add("?isHiddenModel@MR@@YA_NPEBVLiveActor@@@Z", reinterpret_cast<void*>(&d_is_hidden_model));
+    add("?showModel@MR@@YAXPEAVLiveActor@@@Z", reinterpret_cast<void*>(&d_show_model));
+    add("?getCreator@NameObjFactory@@YAP6APEAVNameObj@@PEBD@Z0@Z", reinterpret_cast<void*>(&d_get_creator));
+    add("?requestMountObjectArchives@NameObjFactory@@YAXPEBDAEBVTableIter@@@Z", reinterpret_cast<void*>(&d_mount_archives));
+    add("?initWithoutIter@NameObj@@QEAAXXZ", reinterpret_cast<void*>(&d_init_without_iter));
+    add("?makeActorDead@LiveActor@@UEAAXXZ", reinterpret_cast<void*>(&d_make_dead));
+    add("?setCurrentPlacementZoneId@MR@@YAXH@Z", reinterpret_cast<void*>(&d_set_zone));
+    add("?clearCurrentPlacementZoneId@MR@@YAXXZ", reinterpret_cast<void*>(&d_clear_zone));
+    add("?allocateDrawBufferActorList@SceneFunction@@SAXXZ", reinterpret_cast<void*>(&d_allocate_draw_lists));
+    add("?initAppearState@Kuribo@@QEAAXAEBVTableIter@@@Z", reinterpret_cast<void*>(&d_kuribo_start_state));
+    add("?calcAndSetBaseMtx@LiveActor@@UEAAXXZ", reinterpret_cast<void*>(&d_base_mtx));
+    add("?isExistRail@MR@@YA_NPEBVLiveActor@@@Z", reinterpret_cast<void*>(&d_is_exist_rail));
+    add("?moveCoordAndTransToRailStartPoint@MR@@YAXPEAVLiveActor@@@Z", reinterpret_cast<void*>(&d_rail_start));
+    add("?hideModelAndOnCalcAnim@MR@@YAXPEAVLiveActor@@@Z", reinterpret_cast<void*>(&d_hide_calc_anim));
+    add("?changeItemStatus@MarioAccess@@YAXH@Z", reinterpret_cast<void*>(&d_change_item_status));
+    add("?isEnableNerveChange@MarioActor@@QEBA_NXZ", reinterpret_cast<void*>(&d_can_change_state));
     static NebulaPlugin self{sizeof(NebulaPlugin), "archipelago", "0.1.0"};
     start(&api, &self);
 
@@ -336,6 +472,11 @@ int main(int argc, char** argv) {
         } else if (cmd == "start") {
             int mission = 1;
             in >> stage >> mission;
+            for (MockObj* o : objects) delete o;  // the last stage's objects go with it
+            objects.clear();
+            loading = true;
+            through<void (*)()>("?allocateDrawBufferActorList@SceneFunction@@SAXXZ")();
+            loading = false;
             in_stage = true;
             fire(NEBULA_MOD_EVENT_STAGE_START, mission, stage.c_str());
         } else if (cmd == "star") {
@@ -363,6 +504,65 @@ int main(int argc, char** argv) {
         } else if (cmd == "hit") {
             fire(NEBULA_MOD_EVENT_PLAYER_DAMAGE, 1, nullptr);
             set_mode(0);
+        } else if (cmd == "canopen") {
+            std::string galaxy;
+            in >> galaxy;
+            std::printf("CANOPEN %s %d\n", galaxy.c_str(),
+                        through<bool (*)(const char*)>("?canOnGameEventFlag@GameDataFunction@@YA_NPEBD@Z")(galaxy.c_str()) ? 1 : 0);
+        } else if (cmd == "dome") {
+            std::string galaxy;
+            in >> galaxy;
+            std::printf("DOME %s %u\n", galaxy.c_str(),
+                        through<uint32_t (*)(const char*)>("?getIncludedGrandGalaxyId@GameDataConst@@YAIPEBD@Z")(galaxy.c_str()));
+        } else if (cmd == "swing") {
+            int permission = 0;
+            in >> permission;
+            through<void (*)(bool)>("?setPlayerSwingPermission@MR@@YAX_N@Z")(permission != 0);
+        } else if (cmd == "prologue") {
+            through<void (*)(void*)>("?appear@ProloguePictureBook@@UEAAXXZ")(nullptr);
+            std::printf("PICTUREBOOK %s\n", picture_book_open ? "open" : "closed");
+            through<void (*)(void*)>("?appear@PrologueLetter@@UEAAXXZ")(nullptr);
+            std::printf("LETTER %s\n", letter_open ? "open" : "closed");
+        } else if (cmd == "fields") {
+            std::string name;
+            in >> name;
+            for (MockObj* o : objects) {
+                if (o->name != name || o->dead) continue;
+                float ground[3], height;
+                int32_t wait;
+                std::memcpy(ground, reinterpret_cast<unsigned char*>(o) + 0xEC, sizeof(ground));
+                std::memcpy(&height, reinterpret_cast<unsigned char*>(o) + 0x100, sizeof(height));
+                std::memcpy(&wait, reinterpret_cast<unsigned char*>(o) + 0x104, sizeof(wait));
+                std::printf("FIELDS %s ground %.0f %.0f %.0f height %.0f wait %d\n", name.c_str(), ground[0], ground[1],
+                            ground[2], height, wait);
+            }
+        } else if (cmd == "hide" || cmd == "railstart") {
+            std::string name;
+            in >> name;
+            for (MockObj* o : objects) {
+                if (o->name != name || o->dead) continue;
+                if (cmd == "hide") {
+                    through<void (*)(void*)>("?hideModelAndOnCalcAnim@MR@@YAXPEAVLiveActor@@@Z")(o);
+                    std::printf("AT %s %.0f %.0f %.0f\n", name.c_str(), o->at[0], o->at[1], o->at[2]);
+                } else {
+                    through<void (*)(void*)>("?moveCoordAndTransToRailStartPoint@MR@@YAXPEAVLiveActor@@@Z")(o);
+                }
+            }
+        } else if (cmd == "busy") {
+            int busy = 0;
+            in >> busy;
+            player_busy = busy != 0;
+        } else if (cmd == "defeat") {
+            std::string name;
+            in >> name;
+            int n = 0;
+            for (MockObj* o : objects) {
+                if (o->name == name && !o->dead) {
+                    o->dead = true;
+                    ++n;
+                }
+            }
+            std::printf("MOCK defeated %d %s\n", n, name.c_str());
         } else if (cmd == "cutscene") {
             in >> cutscene;
         } else if (cmd == "movie") {
